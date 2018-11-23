@@ -22,7 +22,7 @@ from neural_LM import load_lm
 from neural_LM.cells import SelfAttentionEncoder, SelfAttentionDecoder, LayerNorm1D
 from neural_tagging.cells import Highway, WeightedCombinationLayer, TemporalDropout, leader_loss, positions_func
 from neural_tagging.dictionary import read_dictionary
-from neural_tagging.vectorizers import UnimorphVectorizer
+from neural_tagging.vectorizers import UnimorphVectorizer, load_vectorizer
 
 BUCKET_SIZE = 32
 MAX_WORD_LENGTH = 30
@@ -34,7 +34,7 @@ def load_tagger(infile):
         json_data = json.load(fin)
     args = {key: value for key, value in json_data.items()
             if not (key.endswith("_") or key.endswith("callback") or
-                    key in ["dump_file", "lm_file"])}
+                    key in ["dump_file", "lm_file", "vectorizer_save_data"])}
     callbacks = []
     early_stopping_callback_data = json_data.get("early_stopping_callback")
     if early_stopping_callback_data is not None:
@@ -66,6 +66,10 @@ def load_tagger(infile):
     # loading language model
     if tagger.use_lm and "lm_file" in json_data:
         tagger.lm_ = load_lm(json_data["lm_file"])
+    # loading word vectorizers
+    for cls, infile, dim in json_data.get("vectorizer_save_data", []):
+        vectorizer = load_vectorizer(cls, infile)
+        tagger.word_vectorizers.append([vectorizer, dim])
     # compiling morpho dictionary (if any)
     if tagger.morpho_dict is not None:
         tagger._make_morpho_dict_indexes_func(tagger.morpho_dict_params["type"])
@@ -190,11 +194,14 @@ class CharacterTagger:
             raise ValueError("There should be the same number of lstm layer units and lstm layers")
         if self.word_vectorizers is None:
             self.word_vectorizers = []
+        self.vectorizer_save_data = []
         for i, (data, dim) in enumerate(self.word_vectorizers):
             cls, params = eval(data["cls"]), data.get("params", dict())
-            infile = data["infile"]
-            vectorizer = cls(**params).train(infile)
+            train_params = data.get("train_params", dict())
+            save_file = data["save_file"]
+            vectorizer = cls(**params).train(save_file=save_file, **train_params)
             self.word_vectorizers[i] = (vectorizer, dim)
+            self.vectorizer_save_data.append((data["cls"], save_file, dim))
         if self.regularizer is not None:
             self.regularizer = kreg.l2(self.regularizer)
         if self.fusion_regularizer is not None:
@@ -242,7 +249,8 @@ class CharacterTagger:
                     attr in ["callbacks", "model_", "_basic_model_",
                              "warmup_model_", "_decoder_", "lm_",
                              "morpho_dict_indexes_func_", "word_tag_mapper_", "morpho_dict_",
-                             "regularizer", "fusion_regularizer", "word_vectorizers"]):
+                             "regularizer", "fusion_regularizer",
+                             "word_vectorizers"]):
                 info[attr] = val
             elif isinstance(val, Vocabulary):
                 info[attr] = val.jsonize()
