@@ -6,10 +6,12 @@ import copy
 # import statprof
 
 import numpy as np
+import tensorflow as tf
+import keras.backend.tensorflow_backend as kbt
 from keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
 from neural_LM.UD_preparation.extract_tags_from_UD import read_tags_infile, make_UD_pos_and_tag
-from neural_tagging.neural_tagging import CharacterTagger, load_tagger
+from neural_tagging.neural_tagging_1 import CharacterTagger, load_tagger
 from neural_LM import load_lm
 
 DEFAULT_NONE_PARAMS = ["model_file", "test_files", "outfiles", "train_files",
@@ -17,6 +19,7 @@ DEFAULT_NONE_PARAMS = ["model_file", "test_files", "outfiles", "train_files",
                        "prediction_files", "comparison_files",
                        "gh_outfiles", "gh_comparison_files"]
 DEFAULT_PARAMS = {}
+DEFAULT_LIST_PARAMS = ["vectorizers"]
 DEFAULT_DICT_PARAMS = ["model_params", "read_params", "predict_params", "vocabulary_files",
                        "train_read_params", "dev_read_params", "test_read_params"]
 
@@ -27,6 +30,8 @@ def read_config(infile):
     params = dict()
     for param in DEFAULT_NONE_PARAMS:
         params[param] = from_json.get(param)
+    for param in DEFAULT_LIST_PARAMS:
+        params[param] = from_json.get(param, [])
     for param in DEFAULT_DICT_PARAMS:
         params[param] = from_json.get(param, dict())
     for param, default_value in DEFAULT_PARAMS.items():
@@ -160,6 +165,10 @@ def make_output(cls, test_data, test_labels, predictions, probs, basic_probs=Non
 
 
 if __name__ == '__main__':
+    config = tf.ConfigProto()
+    config.gpu_options.per_process_gpu_memory_fraction = 0.3
+    kbt.set_session(tf.Session(config=config))
+
     if len(sys.argv[1:]) != 1:
         sys.exit("Usage: main.py <config json file>")
     params = read_config(sys.argv[1])

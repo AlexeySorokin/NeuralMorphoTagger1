@@ -22,6 +22,7 @@ from neural_LM import load_lm
 from neural_LM.cells import SelfAttentionEncoder, SelfAttentionDecoder, LayerNorm1D
 from neural_tagging.cells import Highway, WeightedCombinationLayer, TemporalDropout, leader_loss, positions_func
 from neural_tagging.dictionary import read_dictionary
+from neural_tagging.vectorizers import UnimorphVectorizer
 
 BUCKET_SIZE = 32
 MAX_WORD_LENGTH = 30
@@ -105,17 +106,14 @@ class CharacterTagger:
     """
     def __init__(self, reverse=False, use_lm_loss=False, use_lm=False,
                  morpho_dict=None, morpho_dict_params=None,
-                 morpho_dict_embeddings_size=256,
+                 morpho_dict_embeddings_size=256, word_vectorizers=None,
                  normalize_lm_embeddings=False, base_model_weight=0.25,
-                 word_rnn="cnn", min_char_count=1, char_embeddings_size=16,
-                 char_conv_layers=1, char_window_size=5, char_filters=None,
+                 word_rnn = "cnn", min_char_count=1, char_embeddings_size=16,
+                 char_conv_layers = 1, char_window_size = 5, char_filters = None,
                  total_char_filters=None, char_filter_multiple=25, max_window_filters=200,
-                 char_highway_layers=1, conv_dropout=0.0, highway_dropout=0.0,
-                 intermediate_dropout=0.0, word_dropout=0.0, lm_dropout=0.0,
-                 sa_dropout=0.2, use_self_attention=False, sa_encoder_layers=1,
-                 sa_decoder_layers=1, sa_heads_number=1, use_decoder_future=True,
-                 use_layer_normalization=True,
-                 word_lstm_layers=1, word_lstm_units=128, lstm_dropout=0.0,
+                 char_highway_layers = 1, conv_dropout = 0.0, highway_dropout = 0.0,
+                 intermediate_dropout = 0.0, word_dropout=0.0, lm_dropout=0.0,
+                 word_lstm_layers=1, word_lstm_units=128, lstm_dropout = 0.0,
                  use_rnn_for_weight_state=False, weight_state_rnn_units=64,
                  use_fusion=False, fusion_state_units=256, use_dimension_bias=False,
                  use_intermediate_activation_for_weights=False,
@@ -123,14 +121,16 @@ class CharacterTagger:
                  use_leader_loss=False, leader_loss_weight=0.2,
                  regularizer=None, fusion_regularizer=None,
                  probs_threshold=None, lm_probs_threshold=None,
-                 batch_size=16, validation_split=0.2, nepochs=25, n_warmup_epochs=0,
-                 min_prob=0.01, max_diff=2.0, to_weigh_loss=True, callbacks=None, verbose=1):
+                 batch_size=16, validation_split=0.2, nepochs=25,
+                 min_prob=0.01, max_diff=2.0, to_weigh_loss=True,
+                 callbacks=None, verbose=1):
         self.reverse = reverse
         self.use_lm_loss = use_lm_loss
         self.use_lm = use_lm
         self.morpho_dict = morpho_dict
         self.morpho_dict_params = morpho_dict_params
         self.morpho_dict_embeddings_size = morpho_dict_embeddings_size
+        self.word_vectorizers = word_vectorizers
         self.normalize_lm_embeddings = normalize_lm_embeddings
         self.base_model_weight = base_model_weight
         self.word_rnn = word_rnn
@@ -151,13 +151,6 @@ class CharacterTagger:
         self.word_lstm_units = word_lstm_units
         self.lstm_dropout = lstm_dropout
         self.lm_dropout = lm_dropout
-        self.sa_dropout = sa_dropout
-        self.use_self_attention = use_self_attention
-        self.sa_encoder_layers = sa_encoder_layers
-        self.sa_decoder_layers = sa_decoder_layers
-        self.sa_heads_number = sa_heads_number
-        self.use_decoder_future = use_decoder_future
-        self.use_layer_normalization = use_layer_normalization
         self.use_rnn_for_weight_state = use_rnn_for_weight_state
         self.weight_state_rnn_units = weight_state_rnn_units
         self.use_fusion = use_fusion
@@ -174,15 +167,14 @@ class CharacterTagger:
         self.batch_size = batch_size
         self.validation_split = validation_split
         self.nepochs=nepochs
-        self.n_warmup_epochs = n_warmup_epochs
         self.min_prob = min_prob
         self.max_diff = max_diff
         self.to_weigh_loss = to_weigh_loss
         self.callbacks = callbacks
         self.verbose = verbose
-        self.initialize()
+        self._initialize()
 
-    def initialize(self):
+    def _initialize(self):
         if isinstance(self.char_window_size, int):
             self.char_window_size = [self.char_window_size]
         self.char_window_size = sorted(self.char_window_size)
@@ -196,6 +188,13 @@ class CharacterTagger:
             self.word_lstm_units = [self.word_lstm_units] * self.word_lstm_layers
         if len(self.word_lstm_units) != self.word_lstm_layers:
             raise ValueError("There should be the same number of lstm layer units and lstm layers")
+        if self.word_vectorizers is None:
+            self.word_vectorizers = []
+        for i, (data, dim) in enumerate(self.word_vectorizers):
+            cls, params = eval(data["cls"]), data.get("params", dict())
+            infile = data["infile"]
+            vectorizer = cls(**params).train(infile)
+            self.word_vectorizers[i] = (vectorizer, dim)
         if self.regularizer is not None:
             self.regularizer = kreg.l2(self.regularizer)
         if self.fusion_regularizer is not None:
@@ -243,7 +242,7 @@ class CharacterTagger:
                     attr in ["callbacks", "model_", "_basic_model_",
                              "warmup_model_", "_decoder_", "lm_",
                              "morpho_dict_indexes_func_", "word_tag_mapper_", "morpho_dict_",
-                             "regularizer", "fusion_regularizer"]):
+                             "regularizer", "fusion_regularizer", "word_vectorizers"]):
                 info[attr] = val
             elif isinstance(val, Vocabulary):
                 info[attr] = val.jsonize()
@@ -339,6 +338,9 @@ class CharacterTagger:
                 sent = data[i] if not self.reverse else data[i][::-1]
                 length_func = lambda x: min(len(x), MAX_WORD_LENGTH)+2
                 X[i] = [self._make_sent_vector(sent, bucket_length=bucket_length)]
+                # X[i] = [self._make_sent_vector(sent, bucket_length=bucket_length),
+                #         self._make_tags_vector(sent, bucket_length=bucket_length,
+                #                                func=length_func)]
                 if labels is not None:
                     tags = labels[i] if not self.reverse else labels[i][::-1]
                     X[i].append(self._make_tags_vector(tags, bucket_length=bucket_length))
@@ -355,23 +357,40 @@ class CharacterTagger:
                     X[index].insert(1, lm_states[i])
                     if not self.use_fusion:
                         X[index].insert(1, lm_probs[i])
-            if self.morpho_dict is not None:
+            for vectorizer, _ in self.word_vectorizers[::-1]:
                 if hasattr(self, "lm_") and labels is not None:
                     insert_pos = 3 - int(self.use_fusion)
                 else:
                     insert_pos = 1
                 for i, index in enumerate(bucket_indexes):
-                    curr_sent_tags = np.zeros(
-                        shape=(bucket_length, self.tags_number_), dtype=np.int32)
+                    curr_sent_tags = np.zeros(shape=(bucket_length, vectorizer.dim), dtype=np.float)
                     sent = data[index] if not self.reverse else data[i][::-1]
                     for j, word in enumerate(sent):
                         word = decode_word(word)
-                        if word is not None and word in self.word_tag_mapper_:
-                            word_tags = self.word_tag_mapper_[word]
-                            for tag in word_tags:
-                                tag_indexes = self.morpho_dict_indexes_func_(tag)
-                                curr_sent_tags[j][tag_indexes] = 1
+                        if word is not None:
+                            word_indexes = vectorizer[word]
+                            if word_indexes is not None:
+                                for elem in word_indexes:
+                                    curr_sent_tags[j, elem] += 1.0
+                                curr_sent_tags /= len(word_indexes)
                     X[index].insert(insert_pos, curr_sent_tags)
+            # if self.morpho_dict is not None:
+            #     if hasattr(self, "lm_") and labels is not None:
+            #         insert_pos = 3 - int(self.use_fusion)
+            #     else:
+            #         insert_pos = 1
+            #     for i, index in enumerate(bucket_indexes):
+            #         curr_sent_tags = np.zeros(
+            #             shape=(bucket_length, self.tags_number_), dtype=np.int32)
+            #         sent = data[index] if not self.reverse else data[i][::-1]
+            #         for j, word in enumerate(sent):
+            #             word = decode_word(word)
+            #             if word is not None and word in self.word_tag_mapper_:
+            #                 word_tags = self.word_tag_mapper_[word]
+            #                 for tag in word_tags:
+            #                     tag_indexes = self.morpho_dict_indexes_func_(tag)
+            #                     curr_sent_tags[j][tag_indexes] = 1
+            #         X[index].insert(insert_pos, curr_sent_tags)
         if return_indexes:
             return X, indexes
         else:
@@ -465,20 +484,20 @@ class CharacterTagger:
                 train_indexes_by_buckets.append(curr_indexes)
         train_steps = sum((1 + (len(x)-1) // self.batch_size) for x in train_indexes_by_buckets)
         dev_steps = len(dev_indexes_by_buckets)
-        if hasattr(self, "lm_") and self.n_warmup_epochs > 0:
-            fields_number = 1 + int(self.morpho_dict is not None)
-            train_gen = generate_data(X, train_indexes_by_buckets, self.tags_number_,
-                                      self.batch_size, use_last=False,
-                                      duplicate_answer=False, fields_number=fields_number,
-                                      yield_weights=self.to_weigh_loss)
-            dev_gen = generate_data(X_dev, dev_indexes_by_buckets, self.tags_number_,
-                                    use_last=False, shuffle=False, duplicate_answer=False,
-                                    fields_number=fields_number,
-                                    yield_weights=self.to_weigh_loss)
-            self.warmup_model_.fit_generator(
-                train_gen, steps_per_epoch=train_steps, epochs=self.n_warmup_epochs,
-                callbacks=self.callbacks, validation_data=dev_gen,
-                validation_steps=dev_steps, verbose=1)
+        # if hasattr(self, "lm_") and self.n_warmup_epochs > 0:
+        #     fields_number = 1 + int(self.morpho_dict is not None)
+        #     train_gen = generate_data(X, train_indexes_by_buckets, self.tags_number_,
+        #                               self.batch_size, use_last=False,
+        #                               duplicate_answer=False, fields_number=fields_number,
+        #                               yield_weights=self.to_weigh_loss)
+        #     dev_gen = generate_data(X_dev, dev_indexes_by_buckets, self.tags_number_,
+        #                             use_last=False, shuffle=False, duplicate_answer=False,
+        #                             fields_number=fields_number,
+        #                             yield_weights=self.to_weigh_loss)
+        #     self.warmup_model_.fit_generator(
+        #         train_gen, steps_per_epoch=train_steps, epochs=self.n_warmup_epochs,
+        #         callbacks=self.callbacks, validation_data=dev_gen,
+        #         validation_steps=dev_steps, verbose=1)
         if model_file is not None:
             monitor = "val_p_output_acc" if self.use_lm else "val_acc"
             callback = ModelCheckpoint(model_file, monitor=monitor,
@@ -496,8 +515,7 @@ class CharacterTagger:
                                 duplicate_answer=self.use_lm,
                                 yield_weights=self.to_weigh_loss)
         self.model_.fit_generator(
-            train_gen, steps_per_epoch=train_steps,
-            epochs=self.nepochs-self.n_warmup_epochs,
+            train_gen, steps_per_epoch=train_steps, epochs=self.nepochs,
             callbacks=self.callbacks, validation_data=dev_gen,
             validation_steps=dev_steps, verbose=1)
         if model_file is not None:
@@ -682,23 +700,24 @@ class CharacterTagger:
     def build(self):
         word_inputs = kl.Input(shape=(None, MAX_WORD_LENGTH+2), dtype="int32")
         inputs, basic_inputs = [word_inputs], [word_inputs]
-        word_outputs = self.build_word_cnn(word_inputs)
+        word_outputs = self._build_word_cnn(word_inputs)
+        if self.word_dropout > 0.0:
+            word_outputs = kl.Dropout(self.word_dropout)(word_outputs)
         if hasattr(self, "lm_"):
             if not self.use_fusion:
                 lm_inputs = kl.Input(shape=(None, self.tags_number_), dtype="float32")
                 inputs.append(lm_inputs)
             lm_state_inputs = kl.Input(shape=(None, self.lm_state_dim_), dtype="float32")
             inputs.append(lm_state_inputs)
-        if self.morpho_dict is not None:
-            dictionary_inputs = kl.Input(shape=(None, self.tags_number_), dtype="float32")
-            inputs.append(dictionary_inputs)
-            basic_inputs.append(dictionary_inputs)
-            dictionary_embeddings =\
-                kl.Dense(self.morpho_dict_embeddings_size, use_bias=False)(dictionary_inputs)
-            word_outputs = kl.Concatenate()([word_outputs, dictionary_embeddings])
-        basic_network_func = (self._build_attention_network if self.use_self_attention
-                              else self.build_basic_network)
-        pre_outputs, states = basic_network_func(word_outputs)
+        if len(self.word_vectorizers) > 0:
+            additional_word_inputs = [kl.Input(shape=(None, vectorizer.dim), dtype="float32")
+                                      for vectorizer, _ in self.word_vectorizers]
+            inputs.extend(additional_word_inputs)
+            basic_inputs.extend(additional_word_inputs)
+            additional_word_embeddings = [kl.Dense(dense_dim)(additional_word_inputs[i])
+                                          for i, (_, dense_dim) in enumerate(self.word_vectorizers)]
+            word_outputs = kl.Concatenate()([word_outputs] + additional_word_embeddings)
+        pre_outputs, states = self._build_basic_network(word_outputs)
         loss = (leader_loss(self.leader_loss_weight) if self.use_leader_loss
                 else "categorical_crossentropy")
         compile_args = {"optimizer": ko.nadam(clipnorm=5.0),
@@ -713,7 +732,7 @@ class CharacterTagger:
                 final_outputs = kl.TimeDistributed(
                     kl.Dense(self.tags_number_, activation="softmax",
                              activity_regularizer=self.fusion_regularizer),
-                    name = "p_output")(fusion_state_units)
+                    name="p_output")(fusion_state_units)
                 decoder_inputs = [pre_outputs, states, position_inputs, lm_state_inputs]
             else:
                 if self.use_rnn_for_weight_state:
@@ -734,13 +753,9 @@ class CharacterTagger:
                 decoder_inputs = [pre_outputs, word_outputs, position_inputs, lm_inputs, lm_state_inputs]
             outputs = [final_outputs, pre_outputs]
             loss_weights = [1, self.base_model_weight]
-            pre_compile_args = copy.copy(compile_args)
             compile_args["loss_weights"] = loss_weights
         else:
             outputs = pre_outputs
-        if self.n_warmup_epochs > 0 and hasattr(self, "lm_"):
-            self.warmup_model_ = Model(basic_inputs, pre_outputs)
-            self.warmup_model_.compile(**pre_compile_args)
         self.model_ = Model(inputs, outputs)
         self.model_.compile(**compile_args)
         if hasattr(self, "lm_"):
@@ -750,7 +765,7 @@ class CharacterTagger:
             print(self.model_.summary())
         return self
 
-    def build_word_cnn(self, inputs):
+    def _build_word_cnn(self, inputs):
         inputs = kl.Lambda(kb.one_hot, arguments={"num_classes": self.symbols_number_},
                            output_shape=lambda x: tuple(x) + (self.symbols_number_,))(inputs)
         char_embeddings = kl.Dense(self.char_embeddings_size, use_bias=False)(inputs)
@@ -785,19 +800,19 @@ class CharacterTagger:
         highway_output = Highway(activation="relu")(highway_input)
         return highway_output
 
-    def build_basic_network(self, word_outputs):
+    def _build_basic_network(self, word_outputs):
         """
         Creates the basic network architecture,
         transforming word embeddings to intermediate outputs
         """
         lstm_outputs = word_outputs
-        for j in range(self.word_lstm_layers-1):
+        for j in range(self.word_lstm_layers - 1):
             lstm_outputs = kl.Bidirectional(
                 kl.LSTM(self.word_lstm_units[j], return_sequences=True,
                         dropout=self.lstm_dropout))(lstm_outputs)
         lstm_outputs = kl.Bidirectional(
-                kl.LSTM(self.word_lstm_units[-1], return_sequences=True,
-                        dropout=self.lstm_dropout))(lstm_outputs)
+            kl.LSTM(self.word_lstm_units[-1], return_sequences=True,
+                    dropout=self.lstm_dropout))(lstm_outputs)
         if hasattr(self, "tag_embeddings_"):
             pre_outputs = self.tag_embeddings_output_layer(lstm_outputs)
         else:
@@ -806,33 +821,6 @@ class CharacterTagger:
                          activity_regularizer=self.regularizer),
                 name="p")(lstm_outputs)
         return pre_outputs, lstm_outputs
-
-    def _build_attention_network(self, encoded):
-        for i in range(self.sa_encoder_layers):
-            sa_encoder = SelfAttentionEncoder(self.char_output_dim_, heads=self.sa_heads_number)
-            encoded, _ = sa_encoder(encoded)
-            if self.use_layer_normalization:
-                encoded = LayerNorm1D()(encoded)
-            if self.sa_dropout > 0.0:
-                encoded = kl.Dropout(self.sa_dropout)(encoded)
-        decoded = encoded
-        for i in range(self.sa_decoder_layers):
-            sa_decoder = SelfAttentionDecoder(
-                self.char_output_dim_, attend_future=self.use_decoder_future,
-                heads=self.sa_heads_number)
-            decoded, _, _ = sa_decoder([decoded, encoded])
-            if self.use_layer_normalization:
-                decoded = LayerNorm1D()(decoded)
-            if self.sa_dropout > 0.0:
-                decoded = kl.Dropout(self.sa_dropout)(decoded)
-        if hasattr(self, "tag_embeddings_"):
-            pre_outputs = self.tag_embeddings_output_layer(decoded)
-        else:
-            pre_outputs = kl.TimeDistributed(
-                kl.Dense(self.tags_number_, activation="softmax",
-                         activity_regularizer=self.regularizer),
-                name="p")(decoded)
-        return pre_outputs, decoded
 
     def tag_embeddings_output_layer(self, lstm_outputs):
         outputs_embeddings = kl.TimeDistributed(
