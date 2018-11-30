@@ -10,12 +10,14 @@ POS_MAPPING = {".": "<SENT>", "?": "<QUESTION>", "!":"<EXCLAM>",
 REVERSE_POS_MAPPING = list(POS_MAPPING.values())
 
 
-def make_UD_pos_and_tag(tag):
+def make_UD_pos_and_tag(tag, return_list=False):
     splitted = tag.split(",", maxsplit=1)
     if len(splitted) == 2:
         pos, tag = splitted
+        if return_list:
+            tag = tag.split("|")
     else:
-        pos, tag = splitted[0], "_"
+        pos, tag = splitted[0], ([] if return_list else "_")
     if pos in REVERSE_POS_MAPPING:
         pos = "PUNCT"
     return pos, tag
