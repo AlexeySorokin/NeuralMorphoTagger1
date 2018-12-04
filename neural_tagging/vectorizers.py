@@ -122,6 +122,14 @@ class MatchingVectorizer:
         self.ud_tags_codes_ = {tag: i for i, tag in enumerate(self.ud_tags_)}
         unimorph_pos_to_ud, unimorph_feats_to_ud = self.make_feat_matches(unimorph_data, ud_data)
         self.uni_to_ud_ = self.make_tag_matches(unimorph_pos_to_ud, unimorph_feats_to_ud)
+        self.word_codes_ = dict()
+        for word, tags in unimorph_data.items():
+            curr_tags = set()
+            for tag in tags:
+                code = self.unimorph_tags_codes_[tag]
+                ud_codes = self.uni_to_ud_.get(code, [])
+                curr_tags.update(ud_codes)
+            self.word_codes_[word] = list(curr_tags)
         with open("log_1.out", "w", encoding="utf8") as fout:
             for key, values in sorted(self.uni_to_ud_.items()):
                 for value in values:
@@ -309,6 +317,15 @@ class MatchingVectorizer:
             elif score < possible_values[key][1]:
                 possible_values[key] = (value, score)
         return [pos] + ["{}={}".format(key, value) for key, (value, _) in possible_values.items()]
+
+    def __getitem__(self, item):
+        codes = self.word_codes_.get(item)
+        if codes is None:
+            codes = self.word_codes_.get(item.lower())
+        if codes is not None:
+            return [self.ud_tags_[code] for code in codes]
+        else:
+            return []
 
 
 

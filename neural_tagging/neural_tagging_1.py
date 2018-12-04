@@ -111,6 +111,7 @@ class CharacterTagger:
     def __init__(self, reverse=False, use_lm_loss=False, use_lm=False,
                  morpho_dict=None, morpho_dict_params=None,
                  morpho_dict_embeddings_size=256, word_vectorizers=None,
+                 word_tag_vectorizers=None,
                  normalize_lm_embeddings=False, base_model_weight=0.25,
                  word_rnn = "cnn", min_char_count=1, char_embeddings_size=16,
                  char_conv_layers = 1, char_window_size = 5, char_filters = None,
@@ -135,6 +136,7 @@ class CharacterTagger:
         self.morpho_dict_params = morpho_dict_params
         self.morpho_dict_embeddings_size = morpho_dict_embeddings_size
         self.word_vectorizers = word_vectorizers
+        self.word_tag_vectorizers = word_tag_vectorizers
         self.normalize_lm_embeddings = normalize_lm_embeddings
         self.base_model_weight = base_model_weight
         self.word_rnn = word_rnn
@@ -250,7 +252,7 @@ class CharacterTagger:
                              "warmup_model_", "_decoder_", "lm_",
                              "morpho_dict_indexes_func_", "word_tag_mapper_", "morpho_dict_",
                              "regularizer", "fusion_regularizer",
-                             "word_vectorizers"]):
+                             "word_vectorizers", "word_tag_vectorizers"]):
                 info[attr] = val
             elif isinstance(val, Vocabulary):
                 info[attr] = val.jsonize()
@@ -725,7 +727,13 @@ class CharacterTagger:
             additional_word_embeddings = [kl.Dense(dense_dim)(additional_word_inputs[i])
                                           for i, (_, dense_dim) in enumerate(self.word_vectorizers)]
             word_outputs = kl.Concatenate()([word_outputs] + additional_word_embeddings)
-        pre_outputs, states = self._build_basic_network(word_outputs)
+        additional_word_tag_inputs = [kl.Input(shape=(None, vectorizer.dim), dtype="float32")
+                                 for vectorizer, _ in self.word_vectorizers]
+        inputs.extend(additional_word_tag_inputs)
+        basic_inputs.extend(additional_word_tag_inputs)
+        additional_word_tag_embeddings = [kl.Dense(dense_dim)(additional_word_tag_inputs[i])
+                                          for i, (_, dense_dim) in enumerate(self.word_tag_vectorizers)]
+        pre_outputs, states = self._build_basic_network(word_outputs, additional_word_tag_embeddings)
         loss = (leader_loss(self.leader_loss_weight) if self.use_leader_loss
                 else "categorical_crossentropy")
         compile_args = {"optimizer": ko.nadam(clipnorm=5.0),
@@ -808,7 +816,7 @@ class CharacterTagger:
         highway_output = Highway(activation="relu")(highway_input)
         return highway_output
 
-    def _build_basic_network(self, word_outputs):
+    def _build_basic_network(self, word_outputs, additional_embeddings=None):
         """
         Creates the basic network architecture,
         transforming word embeddings to intermediate outputs
@@ -824,6 +832,7 @@ class CharacterTagger:
         if hasattr(self, "tag_embeddings_"):
             pre_outputs = self.tag_embeddings_output_layer(lstm_outputs)
         else:
+            # pre_logits = kl.TimeDistributed(kl.Dense(self.tags_number_))
             pre_outputs = kl.TimeDistributed(
                 kl.Dense(self.tags_number_, activation="softmax",
                          activity_regularizer=self.regularizer),
