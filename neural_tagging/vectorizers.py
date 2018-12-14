@@ -1,25 +1,16 @@
+import sys
 from collections import defaultdict
 import ujson as json
 from itertools import product
 from functools import reduce
+from abc import abstractmethod
 
 import numpy as np
 from scipy.stats.contingency import chi2_contingency
 
+from neural_tagging.suffix_guesser import load_guesser
 from neural_LM.UD_preparation.extract_tags_from_UD import make_UD_pos_and_tag
-
-
-def read_unimorph_infile(infile):
-    answer = defaultdict(list)
-    with open(infile, "r", encoding="utf8") as fin:
-        for line in fin:
-            line = line.strip()
-            splitted = line.split("\t")
-            if len(splitted) != 3:
-                continue
-            _, word, tag = splitted
-            answer[word].append(tag)
-    return answer
+from read import read_unimorph_infile
 
 
 def read_ud_infile(infile):
@@ -58,13 +49,48 @@ def load_vectorizer(cls, infile):
     return vectorizer
 
 
+class GuessingVectorizer:
 
-class UnimorphVectorizer:
+    def __init__(self, guesser=None, threshold=0.5):
+        self._make_guesser(guesser, threshold)
+
+    def _make_guesser(self, guesser=None, threshold=0.5):
+        self.guesser = guesser
+        self.threshold = threshold
+        if self.guesser is not None:
+            self.guesser_ = load_guesser(self.guesser)
+        else:
+            self.guesser_ = None
+
+    @abstractmethod
+    def _get_basic_code(self, item):
+        raise NotImplementedError()
+
+    @abstractmethod
+    def _tags_to_codes(self, item):
+        raise NotImplementedError()
+
+    def __getitem__(self, item):
+        codes = self._get_basic_code(item)
+        # print(item, codes)
+        if codes is None and self.guesser_ is not None:
+            tags = [tag for tag, value in self.guesser_.predict(item) if value >= self.threshold]
+            # print(item, tags, sep="\n")
+            codes = self._tags_to_codes(tags)
+            # print(codes)
+            # sys.exit()
+        # print("")
+
+        return codes
+
+
+
+class UnimorphVectorizer(GuessingVectorizer):
 
     ATTRS = ["feats_", "feat_codes_", "word_codes_"]
 
-    def __init__(self):
-        pass
+    def __init__(self, guesser=None, threshold=0.5):
+        super().__init__(guesser, threshold)
 
     def train(self, infile, save_file=None):
         data = read_unimorph_infile(infile)
@@ -93,26 +119,36 @@ class UnimorphVectorizer:
     def dim(self):
         return len(self.feat_codes_)
 
-    def __getitem__(self, item):
+    def _tags_to_codes(self, tags):
+        return [[self.feat_codes_[x] for x in extract_features(tag)] for tag in tags]
+
+    def _get_basic_code(self, item):
         codes = self.word_codes_.get(item)
         if codes is None:
             codes = self.word_codes_.get(item.lower())
         return codes
 
 
-class MatchingVectorizer:
+class MatchingVectorizer(GuessingVectorizer):
 
-    def __init__(self, count_threshold=10, prob_threshold=0.9,
+    def __init__(self, guesser=None, threshold=0.5,
+                 pos_count_threshold=100, count_threshold=10,
+                 pos_prob_threshold=0.5, prob_threshold=0.9,
                  significance_threshold=0.001, key_significance_threshold=0.001,
-                 max_ud_tags_number=25):
+                 max_ud_tags_number=25, verbose=0):
+        super().__init__(guesser, threshold)
+        self.pos_count_threshold = pos_count_threshold
         self.count_threshold = count_threshold
+        self.pos_prob_threshold = pos_prob_threshold
         self.prob_threshold = prob_threshold
         self.significance_threshold = significance_threshold
         self.key_significance_threshold = key_significance_threshold
         self.max_ud_tags_number = max_ud_tags_number
+        self.verbose = verbose
 
     def train(self, unimorph_infile, ud_infile, save_file=None):
         unimorph_data = read_unimorph_infile(unimorph_infile)
+        self._unimorph_data = unimorph_data
         unimorph_tags = {tag for tags in unimorph_data.values() for tag in tags}
         self.unimorph_tags_ = sorted(unimorph_tags)
         self.unimorph_tags_codes_ = {tag: i for i, tag in enumerate(self.unimorph_tags_)}
@@ -215,7 +251,8 @@ class MatchingVectorizer:
             uni_feats_counts[curr_uni_feats] += 1
             ud_feats_counts[curr_ud_feats] += 1
         # извлечение соответствующих пар
-        possible_pos_pairs = self.extract_frequent(uni_ud_pos_matrix, to_print=(unimorph_pos_tags, ud_pos_tags))
+        possible_pos_pairs = self.extract_frequent(
+            uni_ud_pos_matrix, mode="pos", to_print=(unimorph_pos_tags, ud_pos_tags))
         total_counts = (ud_feats_counts, uni_feats_counts, len(unimorph_ud_pairs))
         ud_feat_keys = defaultdict(list)
         for i, elem in enumerate(ud_feats):
@@ -229,7 +266,7 @@ class MatchingVectorizer:
                               for i, value in possible_tag_pairs.items()}
         return possible_pos_pairs, possible_tag_pairs
 
-    def extract_frequent(self, matrix, axis=None, total_counts=None, keys=None, to_print=None):
+    def extract_frequent(self, matrix, mode="tag", axis=None, total_counts=None, keys=None, to_print=None):
         m, n = matrix.shape
         if axis is None:
             axis = [0, 1]
@@ -240,14 +277,17 @@ class MatchingVectorizer:
             total_counts = [np.sum(matrix, axis=axe) for axe in range(np.ndim(matrix))]
             total_counts.append(np.sum(matrix))
         if keys is not None:
-            self.row_names = to_print[0]
+            if to_print is not None:
+                self.row_names = to_print[0]
             are_keys_significant = self._find_significant_keys(matrix, total_counts[0], keys)
         else:
             are_keys_significant = np.ones_like(matrix, dtype=bool)
+        prob_threshold = self.prob_threshold if mode == "tag" else self.pos_prob_threshold
+        count_threshold = self.count_threshold if mode == "tag" else self.pos_count_threshold
         for axe in axis:
-            threshold = total_counts[axe] * self.prob_threshold
+            threshold = total_counts[axe] * prob_threshold
             threshold = np.expand_dims(threshold, axis=axe)
-            are_frequent.append((matrix >= np.maximum(threshold, self.count_threshold)))
+            are_frequent.append((matrix >= np.maximum(threshold, count_threshold)))
         are_frequent = np.max(are_frequent, axis=0)
         are_frequent *= are_keys_significant
         # mask = np.expand_dims((np.sum(matrix, axis=1) >= self.count_threshold), axis=1)
@@ -257,11 +297,15 @@ class MatchingVectorizer:
             curr_total_sum = total_counts[-1] - total_counts[1][i] - total_counts[0][j] + matrix[i,j]
             curr_matrix = [[matrix[i,j], total_counts[0][j] - matrix[i, j]],
                            [total_counts[1][i] - matrix[i, j], curr_total_sum]]
-            score = chi2_contingency(curr_matrix, lambda_="log-likelihood")[1]
-            if score < self.significance_threshold:
-                answer[i].append((j, score))
-            if to_print is not None:
-                print("{} {} {:.3f}".format(to_print[0][i], to_print[1][j], score))
+            try:
+                score = chi2_contingency(curr_matrix, lambda_="log-likelihood")[1]
+                if score < self.significance_threshold:
+                    answer[i].append((j, score))
+            except:
+                pass
+            if to_print is not None and self.verbose:
+                print("{} {}".format(to_print[0][i], to_print[1][j], score), end=" ")
+                print(" ".join(str(x) for x in np.ravel(curr_matrix)), "{:.4f}".format(score))
         return answer
 
     def _find_significant_keys(self, matrix, total_counts, keys):
@@ -271,10 +315,14 @@ class MatchingVectorizer:
             indexes = np.array(indexes)[(total_counts[indexes] > 0)]
             for r in possible_rows:
                 curr_matrix = [matrix[r, indexes], total_counts[indexes] - matrix[r, indexes]]
-                score = chi2_contingency(curr_matrix)[1]
-                # print(self.row_names[r], key, "{:.4f}".format(score))
-                if score < self.key_significance_threshold:
-                    answer[r, indexes] = True
+                try:
+                    score = chi2_contingency(curr_matrix)[1]
+                    if hasattr(self, "row_names") and self.verbose:
+                        print(self.row_names[r], key, "{:.4f}".format(score))
+                    if score < self.key_significance_threshold:
+                        answer[r, indexes] = True
+                except:
+                    pass
         return answer
 
     def make_tag_matches(self, pos_pairs, feat_pairs):
@@ -318,20 +366,25 @@ class MatchingVectorizer:
                 possible_values[key] = (value, score)
         return [pos] + ["{}={}".format(key, value) for key, (value, _) in possible_values.items()]
 
-    def __getitem__(self, item):
+    def _get_basic_code(self, item):
         codes = self.word_codes_.get(item)
         if codes is None:
             codes = self.word_codes_.get(item.lower())
-        if codes is not None:
-            return [self.ud_tags_[code] for code in codes]
-        else:
-            return []
+        return codes
 
-
+    def _tags_to_codes(self, tags):
+        curr_tags = set()
+        for tag in tags:
+            code = self.unimorph_tags_codes_[tag]
+            ud_codes = self.uni_to_ud_.get(code, [])
+            curr_tags.update(ud_codes)
+        return list(curr_tags)
 
 
 if __name__ == '__main__':
-    unimorph_infile = "/home/alexeysorokin/data/Data/UniMorph/hungarian"
-    ud_infile = 'data/UD2.0_source/hu-ud-train.conllu'
-    matcher = MatchingVectorizer()
+    unimorph_infile = "/home/alexeysorokin/data/Data/UniMorph/portuguese"
+    ud_infile = '/home/alexeysorokin/data/Data/UD2.0/UD_Portuguese/pt-ud-train.conllu'
+    matcher = MatchingVectorizer(verbose=1, guesser="neural_tagging/dump/guessers/portuguese.guess")
     matcher.train(unimorph_infile, ud_infile)
+    print(matcher["segundo"])
+    # print(matcher["gráfnak"])

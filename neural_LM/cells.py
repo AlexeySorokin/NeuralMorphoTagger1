@@ -17,7 +17,7 @@ from .common import distributed_dot_softmax, distributed_transposed_dot,\
 if kb.backend() == "theano":
     from .cells_theano import make_history_theano, make_context_theano
 elif kb.backend() == "tensorflow":
-    from .cells_tensorflow import batch_shifted_fill, fill_by_slices, batch_add_offset_bias
+    from .cells_tensorflow import *
 
 
 def make_history(X, h, pad, flatten=False):
@@ -67,6 +67,29 @@ def distributed_cell(inputs):
         reverse_dims_order = (1, ndims-1) + tuple(range(2,ndims-1))
         answer = kl.Permute(reverse_dims_order)(answer)
     return answer
+
+
+class WeightedSum(Layer):
+
+    def __init__(self, sigma=0.0, axis=-1, **kwargs):
+        self.sigma = sigma
+        self.axis = axis
+        super().__init__(**kwargs)
+
+    def build(self, input_shape):
+        assert len(input_shape) == 2
+        assert input_shape[0] == input_shape[1]
+        self.w = self.add_weight(name="w", shape=(1,),
+                                 initializer=initializers.Constant(self.sigma), trainable=True)
+        super().build(input_shape)
+
+    def call(self, inputs, **kwargs):
+        assert isinstance(inputs, list) and len(inputs) == 2
+        first, second = inputs
+        w = expand_number_to_shape(self.w, second)
+        answer = first + w * second
+        return answer
+
 
 
 class LayerNorm1D(Layer):

@@ -12,6 +12,7 @@ import keras.optimizers as ko
 import keras.regularizers as kreg
 from keras import Model
 from keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
+from keras.activations import softmax
 
 from neural_LM.UD_preparation.read_tags import is_subsumed, descr_to_feats
 from neural_LM.UD_preparation.extract_tags_from_UD import decode_word
@@ -19,10 +20,10 @@ from neural_LM.vocabulary import Vocabulary, FeatureVocabulary, vocabulary_from_
 from neural_LM.neural_lm import make_bucket_indexes
 from neural_LM.common import *
 from neural_LM import load_lm
-from neural_LM.cells import SelfAttentionEncoder, SelfAttentionDecoder, LayerNorm1D
+from neural_LM.cells import SelfAttentionEncoder, SelfAttentionDecoder, LayerNorm1D, WeightedSum
 from neural_tagging.cells import Highway, WeightedCombinationLayer, TemporalDropout, leader_loss, positions_func
 from neural_tagging.dictionary import read_dictionary
-from neural_tagging.vectorizers import UnimorphVectorizer, load_vectorizer
+from neural_tagging.vectorizers import UnimorphVectorizer, MatchingVectorizer, load_vectorizer
 
 BUCKET_SIZE = 32
 MAX_WORD_LENGTH = 30
@@ -204,6 +205,15 @@ class CharacterTagger:
             vectorizer = cls(**params).train(save_file=save_file, **train_params)
             self.word_vectorizers[i] = (vectorizer, dim)
             self.vectorizer_save_data.append((data["cls"], save_file, dim))
+        if self.word_tag_vectorizers is None:
+            self.word_tag_vectorizers = []
+        self.tag_vectorizer_save_data = []
+        for i, data in enumerate(self.word_tag_vectorizers):
+            cls, params = eval(data["cls"]), data.get("params", dict())
+            train_params = data.get("train_params", dict())
+            # save_file = data["save_file"]
+            self.word_tag_vectorizers[i] = cls(**params).train(**train_params)
+            self.tag_vectorizer_save_data.append((data["cls"],))
         if self.regularizer is not None:
             self.regularizer = kreg.l2(self.regularizer)
         if self.fusion_regularizer is not None:
@@ -367,11 +377,11 @@ class CharacterTagger:
                     X[index].insert(1, lm_states[i])
                     if not self.use_fusion:
                         X[index].insert(1, lm_probs[i])
+            if hasattr(self, "lm_") and labels is not None:
+                insert_pos = 3 - int(self.use_fusion)
+            else:
+                insert_pos = 1
             for vectorizer, _ in self.word_vectorizers[::-1]:
-                if hasattr(self, "lm_") and labels is not None:
-                    insert_pos = 3 - int(self.use_fusion)
-                else:
-                    insert_pos = 1
                 for i, index in enumerate(bucket_indexes):
                     curr_sent_tags = np.zeros(shape=(bucket_length, vectorizer.dim), dtype=np.float)
                     sent = data[index] if not self.reverse else data[i][::-1]
@@ -379,10 +389,25 @@ class CharacterTagger:
                         word = decode_word(word)
                         if word is not None:
                             word_indexes = vectorizer[word]
-                            if word_indexes is not None:
+                            if word_indexes is not None and len(word_indexes) > 0:
                                 for elem in word_indexes:
                                     curr_sent_tags[j, elem] += 1.0
                                 curr_sent_tags /= len(word_indexes)
+                    X[index].insert(insert_pos, curr_sent_tags)
+            insert_pos += len(self.word_vectorizers)
+            for vectorizer in self.word_tag_vectorizers[::-1]:
+                for i, index in enumerate(bucket_indexes):
+                    curr_sent_tags = np.zeros(shape=(bucket_length, self.tags_number_), dtype=np.float)
+                    sent = data[index] if not self.reverse else data[i][::-1]
+                    for j, word in enumerate(sent):
+                        word = decode_word(word)
+                        if word is not None:
+                            word_tags = vectorizer[word]
+                            word_indexes = [self.tags_.toidx(tag) for tag in word_tags]
+                            word_indexes = [x for x in word_indexes if x != UNKNOWN]
+                            if len(word_indexes) > 0:
+                                # curr_sent_tags[j, word_indexes] += 1 / np.log2(len(word_indexes) + 1)
+                                curr_sent_tags[j, word_indexes] += 1 / len(word_indexes)
                     X[index].insert(insert_pos, curr_sent_tags)
             # if self.morpho_dict is not None:
             #     if hasattr(self, "lm_") and labels is not None:
@@ -727,13 +752,11 @@ class CharacterTagger:
             additional_word_embeddings = [kl.Dense(dense_dim)(additional_word_inputs[i])
                                           for i, (_, dense_dim) in enumerate(self.word_vectorizers)]
             word_outputs = kl.Concatenate()([word_outputs] + additional_word_embeddings)
-        additional_word_tag_inputs = [kl.Input(shape=(None, vectorizer.dim), dtype="float32")
-                                 for vectorizer, _ in self.word_vectorizers]
+        additional_word_tag_inputs = [kl.Input(shape=(None, self.tags_number_), dtype="float32")
+                                      for vectorizer in self.word_tag_vectorizers]
         inputs.extend(additional_word_tag_inputs)
         basic_inputs.extend(additional_word_tag_inputs)
-        additional_word_tag_embeddings = [kl.Dense(dense_dim)(additional_word_tag_inputs[i])
-                                          for i, (_, dense_dim) in enumerate(self.word_tag_vectorizers)]
-        pre_outputs, states = self._build_basic_network(word_outputs, additional_word_tag_embeddings)
+        pre_outputs, states = self._build_basic_network(word_outputs, additional_word_tag_inputs)
         loss = (leader_loss(self.leader_loss_weight) if self.use_leader_loss
                 else "categorical_crossentropy")
         compile_args = {"optimizer": ko.nadam(clipnorm=5.0),
@@ -832,10 +855,17 @@ class CharacterTagger:
         if hasattr(self, "tag_embeddings_"):
             pre_outputs = self.tag_embeddings_output_layer(lstm_outputs)
         else:
-            # pre_logits = kl.TimeDistributed(kl.Dense(self.tags_number_))
-            pre_outputs = kl.TimeDistributed(
-                kl.Dense(self.tags_number_, activation="softmax",
-                         activity_regularizer=self.regularizer),
+            if len(self.word_tag_vectorizers) > 0:
+                pre_outputs = kl.TimeDistributed(kl.Dense(self.tags_number_))(lstm_outputs)
+                for elem in additional_embeddings:
+                    pre_outputs = WeightedSum()([pre_outputs, elem])
+                pre_outputs = kl.TimeDistributed(kl.Activation(activation="softmax"), name="p")(pre_outputs)
+                if self.regularizer is not None:
+                    pre_outputs = kl.ActivityRegularization(l2=self.regularizer.l2)(pre_outputs)
+            else:
+                pre_outputs = kl.TimeDistributed(
+                    kl.Dense(self.tags_number_, activation="softmax",
+                             activity_regularizer=self.regularizer),
                 name="p")(lstm_outputs)
         return pre_outputs, lstm_outputs
 

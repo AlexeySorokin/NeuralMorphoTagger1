@@ -20,8 +20,9 @@ from neural_LM.neural_lm import make_bucket_indexes
 from neural_LM.common import *
 from neural_LM import load_lm
 from neural_LM.cells import SelfAttentionEncoder, SelfAttentionDecoder, LayerNorm1D
-from neural_tagging.cells import Highway, WeightedCombinationLayer, TemporalDropout, leader_loss, positions_func
 from neural_tagging.dictionary import read_dictionary
+from neural_tagging.cells import Highway, WeightedCombinationLayer, TemporalDropout, leader_loss, positions_func
+
 
 BUCKET_SIZE = 32
 MAX_WORD_LENGTH = 30

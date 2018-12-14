@@ -94,10 +94,15 @@ def expand_on_edges(a, L, R):
     """
     Expands a by L copies of a[0] on the left and R copies of a[-1] on the right
     """
-    left = tf.tile(a[:1], [L] + [1] * (tf.keras.backend.ndim(a) - 1))
+    left = tf.tile(a[:1], [L] + [1] * ( - 1))
     right = tf.tile(a[-1:], [R] + [1] * (tf.keras.backend.ndim(a) - 1))
     return tf.concat([left, a, right], axis=0)
 
+
+def expand_number_to_shape(a, b):
+    for _ in range(tf.keras.backend.ndim(b) - 1):
+        a = tf.expand_dims(a, axis=-1)
+    return tf.tile(a, tf.shape(b))
 
 def batch_add_offset_bias(x, q, bias, transpose_bias=True):
     # performs x_{rij} = x_{rij} + dot(q_{ri}, bias_{clip(j-i, -k, k)}),
