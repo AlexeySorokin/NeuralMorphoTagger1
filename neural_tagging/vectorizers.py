@@ -188,23 +188,27 @@ class MatchingVectorizer(GuessingVectorizer):
             # выделение признаков
             curr_unimorph_tags = [elem.split(";") for elem in curr_unimorph_tags]
             curr_unimorph_tags = [(elem[0], elem[1:]) for elem in curr_unimorph_tags]
-            curr_unimorph_feats = [feat for elem in curr_unimorph_tags for feat in elem[1]]
+            curr_unimorph_pos_tags = set(elem[0] for elem in curr_unimorph_tags)
+            curr_unimorph_feats = set(feat for elem in curr_unimorph_tags for feat in elem[1])
+
             curr_ud_tags = [(make_UD_pos_and_tag(x)) + (count,) for x, count in curr_ud_tags.items()]
             curr_ud_tags = [(elem[0], (elem[1].split("|") if elem[1] != "_" else []), elem[2]) for elem in curr_ud_tags]
-            for curr_unimorph_pos, _ in curr_unimorph_tags:
-                unimorph_pos_tags[curr_unimorph_pos] += len(curr_ud_tags)
+            curr_ud_pos_tags = set(elem[0] for elem in curr_ud_tags)
+            curr_ud_feats = set(feat for elem in curr_ud_tags for feat in elem[1])
+
+            for curr_unimorph_pos in curr_unimorph_pos_tags:
+                unimorph_pos_tags[curr_unimorph_pos] += 1
             for feat in curr_unimorph_feats:
-                unimorph_feats[feat] += len(curr_ud_tags)
-            for elem in curr_ud_tags:
-                ud_pos_tags[elem[0]] += 1
-                for ud_feat in elem[1]:
-                    ud_feats[ud_feat] += 1
-            for pos, feats, count in curr_ud_tags:
-                for curr_unimorph_pos, curr_unimorph_feats in curr_unimorph_tags:
-                    uni_ud_pos_counts[curr_unimorph_pos][pos] += 1
-                    for unimorph_feat in curr_unimorph_feats:
-                        for ud_feat in feats:
-                            uni_ud_tag_counts[unimorph_feat][ud_feat] += 1
+                unimorph_feats[feat] += 1
+            for ud_pos in curr_ud_pos_tags:
+                ud_pos_tags[ud_pos] += 1
+            for feat in curr_ud_feats:
+                ud_feats[feat] += 1
+            for x, y in product(curr_unimorph_pos_tags, curr_ud_pos_tags):
+                uni_ud_pos_counts[x][y] += 1
+            for x, y in product(curr_unimorph_feats, curr_ud_feats):
+                uni_ud_tag_counts[x][y] += 1
+
             for ud_tag in curr_ud_tags:
                 unimorph_ud_pairs.append([curr_unimorph_tags, ud_tag])
         # нормализация
