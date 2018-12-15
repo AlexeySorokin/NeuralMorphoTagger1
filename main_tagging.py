@@ -3,7 +3,7 @@ import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 import json
 import copy
-# import statprof
+from collections import defaultdict
 
 import numpy as np
 import tensorflow as tf
@@ -21,7 +21,8 @@ DEFAULT_NONE_PARAMS = ["model_file", "test_files", "outfiles", "train_files",
 DEFAULT_PARAMS = {}
 DEFAULT_LIST_PARAMS = ["vectorizers"]
 DEFAULT_DICT_PARAMS = ["model_params", "read_params", "predict_params", "vocabulary_files",
-                       "train_read_params", "dev_read_params", "test_read_params"]
+                       "train_read_params", "dev_read_params", "test_read_params",
+                       "additional_train_files"]
 
 
 def read_config(infile):
@@ -166,7 +167,7 @@ def make_output(cls, test_data, test_labels, predictions, probs, basic_probs=Non
 
 if __name__ == '__main__':
     config = tf.ConfigProto()
-    config.gpu_options.per_process_gpu_memory_fraction = 0.3
+    config.gpu_options.per_process_gpu_memory_fraction = 0.5
     kbt.set_session(tf.Session(config=config))
 
     if len(sys.argv[1:]) != 1:
@@ -201,8 +202,23 @@ if __name__ == '__main__':
             dev_data, dev_labels = [x[0] for x in dev_data], [x[1] for x in dev_data]
         else:
             dev_data, dev_labels = None, None
-        # statprof.start()
+        if params["additional_train_files"] is not None:
+            additional_train_datasets = defaultdict(list)
+            for train_file, code in params["additional_train_files"]:
+                curr_data = read_tags_infile(train_file, read_words=True, **train_read_params)
+                additional_train_datasets[code].append(curr_data)
+            additional_train_data, additional_train_labels = [], []
+            for code, datasets in sorted(additional_train_datasets.items()):
+                curr_data, curr_labels = [], []
+                for dataset in datasets:
+                    curr_data += [x[0] for x in dataset[:1000]]
+                    curr_labels += [x[1] for x in dataset[:1000]]
+                additional_train_data.append(curr_data)
+                additional_train_labels.append(curr_labels)
+        else:
+            additional_train_data, additional_train_labels = None, None
         cls.train(train_data, train_labels, dev_data, dev_labels,
+                  additional_train_data, additional_train_labels,
                   model_file=params["model_file"], save_file=params["save_file"],
                   lm_file=params["lm_file"], **params["vocabulary_files"])
     elif params["load_file"] is not None:

@@ -1,0 +1,20 @@
+{
+	"train_files": ["/home/alexeysorokin/data/Data/UD2.3/UD_Belarusian-HSE/be_hse-ud-train.conllu"],
+    "dev_files": ["/home/alexeysorokin/data/Data/UD2.3/UD_Belarusian-HSE/be_hse-ud-dev.conllu"],
+    "test_files": ["/home/alexeysorokin/data/Data/UD2.3/UD_Belarusian-HSE/be_hse-ud-test.conllu"],
+    "additional_train_files": [["/home/alexeysorokin/data/Data/UD2.3/UD_Russian-SynTagRus/ru_syntagrus-ud-train.conllu", 1],
+                                ["/home/alexeysorokin/data/Data/UD2.3/UD_Ukrainian-IU/uk_iu-ud-train.conllu", 2]],
+    "model_file": "neural_tagging/models/work/cs-basic.hdf5",
+    "save_file": "neural_tagging/models/work/cs-basic.json",
+    "model_params": {
+        "additional_inputs_number": 1, "additional_inputs_weight": 0.05,
+		"use_lm_loss": false, "use_lm": false, "normalize_lm_embeddings": false,
+        "min_char_count": 3, "char_embeddings_size": 32, "char_window_size": [1, 2, 3, 4, 5, 6, 7],
+        "word_lstm_units": 128, "nepochs": 40, "conv_dropout": 0.0, "char_conv_layers": 1,
+        "char_highway_layers": 1, "highway_dropout": 0.0, "word_lstm_layers": 1,
+        "char_filter_multiple": 50, "intermediate_dropout": 0.0, "word_dropout": 0.2, "lstm_dropout": 0.2,
+        "regularizer": 0.01, "lm_dropout": 0.2
+    },
+    "read_params": {"to_lower": true, "append_case": "first"},
+    "stop_callback": {"patience": 5, "monitor": "val_acc"}
+}

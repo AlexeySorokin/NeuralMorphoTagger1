@@ -113,6 +113,7 @@ class CharacterTagger:
                  morpho_dict=None, morpho_dict_params=None,
                  morpho_dict_embeddings_size=256, word_vectorizers=None,
                  word_tag_vectorizers=None,
+                 additional_inputs_number=0, additional_inputs_weight=0,
                  normalize_lm_embeddings=False, base_model_weight=0.25,
                  word_rnn = "cnn", min_char_count=1, char_embeddings_size=16,
                  char_conv_layers = 1, char_window_size = 5, char_filters = None,
@@ -138,6 +139,8 @@ class CharacterTagger:
         self.morpho_dict_embeddings_size = morpho_dict_embeddings_size
         self.word_vectorizers = word_vectorizers
         self.word_tag_vectorizers = word_tag_vectorizers
+        self.additional_inputs_number = additional_inputs_number
+        self.additional_inputs_weight = additional_inputs_weight
         self.normalize_lm_embeddings = normalize_lm_embeddings
         self.base_model_weight = base_model_weight
         self.word_rnn = word_rnn
@@ -292,7 +295,7 @@ class CharacterTagger:
 
     @property
     def symbols_number_(self):
-        return self.symbols_.symbols_number_
+        return self.symbols_.symbols_number_ + self.additional_inputs_number
 
     @property
     def tags_number_(self):
@@ -301,6 +304,13 @@ class CharacterTagger:
     @property
     def windows_number(self):
         return len(self.char_window_size)
+
+    def _additional_symbol_index(self, i):
+        return self.symbols_.symbols_number_ + i
+
+    @property
+    def has_additional_inputs(self):
+        return (self.additional_inputs_number > 0)
 
     def _make_word_dictionary(self, data=None):
         self._make_word_tag_mapper(data)
@@ -343,7 +353,10 @@ class CharacterTagger:
         self.morpho_dict_indexes_func_ = func
 
     def transform(self, data, labels=None, pad=True, return_indexes=True,
-                  buckets_number=None, bucket_size=None, join_buckets=True):
+                  buckets_number=None, bucket_size=None, join_buckets=True,
+                  dataset_codes=None):
+        if dataset_codes is None:
+            dataset_codes = [0] * len(data)
         lengths = [len(x)+2 for x in data]
         if pad:
             indexes, level_lengths = make_bucket_indexes(
@@ -354,10 +367,11 @@ class CharacterTagger:
             level_lengths = lengths
         X = [None] * len(data)
         for r, (bucket_indexes, bucket_length) in enumerate(zip(indexes, level_lengths)):
+            bucket_length += int(self.additional_inputs_number > 0)
             for i in bucket_indexes:
                 sent = data[i] if not self.reverse else data[i][::-1]
                 length_func = lambda x: min(len(x), MAX_WORD_LENGTH)+2
-                X[i] = [self._make_sent_vector(sent, bucket_length=bucket_length)]
+                X[i] = [self._make_sent_vector(sent, dataset_codes[i], bucket_length=bucket_length)]
                 # X[i] = [self._make_sent_vector(sent, bucket_length=bucket_length),
                 #         self._make_tags_vector(sent, bucket_length=bucket_length,
                 #                                func=length_func)]
@@ -431,17 +445,19 @@ class CharacterTagger:
         else:
             return X
 
-    def _make_sent_vector(self, sent, bucket_length=None):
+    def _make_sent_vector(self, sent, dataset_code=0, bucket_length=None):
         if bucket_length is None:
             bucket_length = len(sent)
         answer = np.zeros(shape=(bucket_length, MAX_WORD_LENGTH+2), dtype=np.int32)
         for i, word in enumerate(sent):
             answer[i, 0] = BEGIN
-            m = min(len(word), MAX_WORD_LENGTH)
-            for j, x in enumerate(word[-m:]):
+            m = min(len(word), MAX_WORD_LENGTH - int(self.has_additional_inputs))
+            if self.additional_inputs_number > 0:
+                answer[i, 1] = self._additional_symbol_index(dataset_code)
+            for j, x in enumerate(word[-m:], self.additional_inputs_number):
                 answer[i, j+1] = self.symbols_.toidx(x)
-            answer[i, m+1] = END
-            answer[i, m+2:] = PAD
+            answer[i, self.additional_inputs_number+m+1] = END
+            answer[i, self.additional_inputs_number+m+2:] = PAD
         return answer
 
     def _make_tags_vector(self, tags, bucket_length=None, func=None):
@@ -454,6 +470,7 @@ class CharacterTagger:
         return answer
 
     def train(self, data, labels, dev_data=None, dev_labels=None,
+              additional_data=None, additional_labels=None,
               symbol_vocabulary_file=None, tags_vocabulary_file=None,
               lm_file=None, model_file=None, save_file=None):
         """
@@ -465,6 +482,11 @@ class CharacterTagger:
         :return:
         """
         # vocabularies for symbols and tags
+        data_for_vocab, labels_for_vocab = data, labels
+        if additional_data is not None:
+            for (elem, elem_labels) in zip(additional_data, additional_labels):
+                data_for_vocab += elem
+                labels_for_vocab += elem_labels
         if symbol_vocabulary_file is None:
             self.symbols_ = Vocabulary(character=True, min_count=self.min_char_count).train(data)
         else:
@@ -488,7 +510,14 @@ class CharacterTagger:
         if self.morpho_dict is not None:
             data_for_dict = data + dev_data if dev_data is not None else data
             self._make_word_dictionary(data_for_dict)
-        X_train, indexes_by_buckets = self.transform(data, labels, buckets_number=10)
+        dataset_codes = [0] * len(data)
+        if self.additional_inputs_number > 0:
+            for code, (add_dataset, add_labels) in enumerate(zip(additional_data, additional_labels), 1):
+                data += add_dataset
+                dataset_codes += [code] * len(add_dataset)
+                labels += add_labels
+        X_train, indexes_by_buckets = self.transform(
+            data, labels, buckets_number=10, dataset_codes=dataset_codes)
         if dev_data is not None:
             X_dev, dev_indexes_by_buckets =\
                 self.transform(dev_data, dev_labels, bucket_size=BUCKET_SIZE)
@@ -502,7 +531,15 @@ class CharacterTagger:
         return self
 
     def _train_on_data(self, X, indexes_by_buckets, X_dev=None,
-                       dev_indexes_by_buckets=None, model_file=None):
+                       dev_indexes_by_buckets=None, model_file=None,
+                       dataset_codes=None):
+        if dataset_codes is None:
+            weights = np.ones(shape=(len(X)))
+        else:
+            if X_dev is None:
+                raise ValueError("You should implicitly pass X_dev when using additional data")
+            dataset_codes = np.array(dataset_codes)
+            weights = np.where(dataset_codes == 0.0, 1.0, self.additional_inputs_weight)
         if X_dev is None:
             X_dev, dev_indexes_by_buckets = X, []
             validation_split = self.validation_split
@@ -544,7 +581,8 @@ class CharacterTagger:
         train_gen = generate_data(X, train_indexes_by_buckets, self.tags_number_,
                                   self.batch_size, use_last=False,
                                   duplicate_answer=self.use_lm,
-                                  yield_weights=self.to_weigh_loss)
+                                  yield_weights=self.to_weigh_loss,
+                                  weights=weights)
         dev_gen = generate_data(X_dev, dev_indexes_by_buckets, self.tags_number_,
                                 use_last=False, shuffle=False,
                                 duplicate_answer=self.use_lm,

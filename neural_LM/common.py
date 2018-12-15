@@ -160,7 +160,10 @@ class CustomCallback(Callback):
 def generate_data(X, indexes_by_buckets, output_symbols_number,
                   batch_size=None, use_last=True, has_answer=True,
                   shift_answer=False, shuffle=True, yield_weights=True,
-                  duplicate_answer=False, fields_number=None):
+                  duplicate_answer=False, fields_number=None,
+                  weights=None):
+    if weights is None:
+        weights = np.ones(shape=(len(X)))
     if fields_number is None:
         fields_number = len(X[0]) - int(has_answer and not use_last)
     answer_index = 0 if use_last else -1 if has_answer else None
@@ -191,6 +194,7 @@ def generate_data(X, indexes_by_buckets, output_symbols_number,
                     indexes_to_yield = np.hstack((indexes_to_yield[:,1:], padding))
                 y_to_yield = to_one_hot(indexes_to_yield, output_symbols_number)
                 weights_to_yield = np.ones(shape=(end - start,), dtype=np.float32)
+                weights_to_yield *= weights[bucket_indexes]
                 if yield_weights:
                     weights_to_yield *= total_data_length * indexes_to_yield.shape[1]
                     weights_to_yield /= total_arrays_size
