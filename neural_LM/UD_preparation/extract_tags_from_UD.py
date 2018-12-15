@@ -10,17 +10,34 @@ POS_MAPPING = {".": "<SENT>", "?": "<QUESTION>", "!":"<EXCLAM>",
 REVERSE_POS_MAPPING = list(POS_MAPPING.values())
 
 
-def make_UD_pos_and_tag(tag, return_list=False):
+def make_UD_pos_and_tag(tag, return_mode=None):
     splitted = tag.split(",", maxsplit=1)
     if len(splitted) == 2:
         pos, tag = splitted
-        if return_list:
-            tag = tag.split("|")
+        if return_mode is not None:
+            tag = tuple(tag.split("|"))
+            if return_mode == "dict":
+                tag = dict(elem.split("=") for elem in tag)
+            if return_mode == "items":
+                tag = tuple(sorted(tuple(elem.split("=")) for elem in tag))
     else:
-        pos, tag = splitted[0], ([] if return_list else "_")
+        pos = splitted[0]
+        tag = dict() if return_mode == "dict" else ("_" if return_mode is None else tuple())
     if pos in REVERSE_POS_MAPPING:
         pos = "PUNCT"
     return pos, tag
+
+
+def make_full_UD_tag(pos, tag, mode=None):
+    if tag == "_" or len(tag) == 0:
+        return pos
+    if mode == "dict":
+        tag, mode = sorted(tag.items()), "items"
+    if mode == "items":
+        tag, mode = ["{}={}".format(*elem) for elem in tag], "list"
+    if mode == "list":
+        tag = "|".join(tag)
+    return "{},{}".format(pos, tag)
 
 
 def decode_word(word):

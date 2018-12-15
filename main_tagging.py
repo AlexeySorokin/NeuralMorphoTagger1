@@ -13,6 +13,7 @@ from keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from neural_LM.UD_preparation.extract_tags_from_UD import read_tags_infile, make_UD_pos_and_tag
 from neural_tagging.neural_tagging_1 import CharacterTagger, load_tagger
 from neural_LM import load_lm
+from neural_tagging.misc import TagNormalizer
 
 DEFAULT_NONE_PARAMS = ["model_file", "test_files", "outfiles", "train_files",
                        "dev_files", "dump_file", "save_file", "lm_file",
@@ -203,6 +204,7 @@ if __name__ == '__main__':
         else:
             dev_data, dev_labels = None, None
         if params["additional_train_files"] is not None:
+            normalizer = TagNormalizer().train(train_labels + dev_labels)
             additional_train_datasets = defaultdict(list)
             for train_file, code in params["additional_train_files"]:
                 curr_data = read_tags_infile(train_file, read_words=True, **train_read_params)
@@ -214,6 +216,7 @@ if __name__ == '__main__':
                     curr_data += [x[0] for x in dataset[:1000]]
                     curr_labels += [x[1] for x in dataset[:1000]]
                 additional_train_data.append(curr_data)
+                curr_labels = [[normalizer.transform(x, mode="UD") for x in elem] for elem in curr_labels]
                 additional_train_labels.append(curr_labels)
         else:
             additional_train_data, additional_train_labels = None, None

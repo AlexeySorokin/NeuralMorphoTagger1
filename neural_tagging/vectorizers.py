@@ -352,7 +352,7 @@ class MatchingVectorizer(GuessingVectorizer):
         answer = dict()
         indexes_by_keys = defaultdict(set)
         for i, tag in enumerate(self.ud_tags_):
-            pos, feats = make_UD_pos_and_tag(tag, return_list=True)
+            pos, feats = make_UD_pos_and_tag(tag, return_mode="list")
             indexes_by_keys[pos].add(i)
             for feat in feats:
                 indexes_by_keys[feat].add(i)
