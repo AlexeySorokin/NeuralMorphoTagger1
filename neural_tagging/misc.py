@@ -126,7 +126,6 @@ class TagNormalizer:
         return final_answer
 
 
-
 if __name__ == "__main__":
     tags = read_tags_infile("/home/alexeysorokin/data/Data/UD2.3/UD_Belarusian-HSE/be_hse-ud-train.conllu")
     tags += read_tags_infile("/home/alexeysorokin/data/Data/UD2.3/UD_Belarusian-HSE/be_hse-ud-dev.conllu")

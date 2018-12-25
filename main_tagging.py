@@ -203,18 +203,20 @@ if __name__ == '__main__':
             dev_data, dev_labels = [x[0] for x in dev_data], [x[1] for x in dev_data]
         else:
             dev_data, dev_labels = None, None
-        if params["additional_train_files"] is not None:
-            normalizer = TagNormalizer().train(train_labels + dev_labels)
+        if len(params["additional_train_files"]) > 0:
+            normal_tags = train_labels + (dev_labels if dev_labels is not None else [])
+            normalizer = TagNormalizer().train(normal_tags)
             additional_train_datasets = defaultdict(list)
-            for train_file, code in params["additional_train_files"]:
-                curr_data = read_tags_infile(train_file, read_words=True, **train_read_params)
+            additional_read_params = params["additional_read_params"]
+            if isinstance(additional_read_params, dict):
+                additional_read_params = [additional_read_params] * len(params["additional_train_files"])
+            for i, (train_file, code) in enumerate(params["additional_train_files"]):
+                curr_data = read_tags_infile(train_file, read_words=True, **additional_read_params[i])
                 additional_train_datasets[code].append(curr_data)
             additional_train_data, additional_train_labels = [], []
             for code, datasets in sorted(additional_train_datasets.items()):
-                curr_data, curr_labels = [], []
-                for dataset in datasets:
-                    curr_data += [x[0] for x in dataset[:1000]]
-                    curr_labels += [x[1] for x in dataset[:1000]]
+                curr_data = [x[0] for dataset in datasets for x in dataset]
+                curr_labels = [x[1] for dataset in datasets for x in dataset]
                 additional_train_data.append(curr_data)
                 curr_labels = [[normalizer.transform(x, mode="UD") for x in elem] for elem in curr_labels]
                 additional_train_labels.append(curr_labels)

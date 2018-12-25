@@ -19,14 +19,27 @@ AUXILIARY = ['PAD', 'BEGIN', 'END', 'UNKNOWN']
 AUXILIARY_CODES = PAD, BEGIN, END, UNKNOWN = 0, 1, 2, 3
 
 
-def to_one_hot(x, k):
-    """
-    Takes an array of integers and transforms it
-    to an array of one-hot encoded vectors
-    """
-    unit = np.eye(k, dtype=int)
-    return unit[x]
+# def to_one_hot(x, k):
+#     """
+#     Takes an array of integers and transforms it
+#     to an array of one-hot encoded vectors
+#     """
+#     unit = np.eye(k, dtype=int)
+#     return unit[x]
 
+def to_one_hot(indices, num_classes):
+    """
+    Theano implementation for numpy arrays
+
+    :param indices: np.array, dtype=int
+    :param num_classes: int, число классов
+    :return: answer, np.array, shape=indices.shape+(num_classes,)
+    """
+    shape = indices.shape
+    indices = np.ravel(indices)
+    answer = np.zeros(shape=(indices.shape[0], num_classes), dtype=int)
+    answer[np.arange(indices.shape[0]), indices] = 1
+    return answer.reshape(shape+(num_classes,))
 
 def repeat_(x, k):
     tile_factor = [1, k] + [1] * (kb.ndim(x) - 1)
@@ -192,6 +205,7 @@ def generate_data(X, indexes_by_buckets, output_symbols_number,
                 if shift_answer:
                     padding = np.full(shape=(end - start, 1), fill_value=PAD)
                     indexes_to_yield = np.hstack((indexes_to_yield[:,1:], padding))
+                # y_to_yield = to_one_hot(indexes_to_yield, output_symbols_number)
                 y_to_yield = to_one_hot(indexes_to_yield, output_symbols_number)
                 weights_to_yield = np.ones(shape=(end - start,), dtype=np.float32)
                 weights_to_yield *= weights[bucket_indexes]
