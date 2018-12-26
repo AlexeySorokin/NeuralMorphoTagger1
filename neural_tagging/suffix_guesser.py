@@ -62,12 +62,15 @@ class SuffixGuesser:
     INF = 1000
 
     def __init__(self, max_suffix_length=8, min_suffix_count=10, min_impurity=1e-6,
-                 threshold=0.5, min_suffix_to_guess=3):
+                 threshold=0.5, min_suffix_to_guess=3, symbols_to_remove="",
+                 allow_spaces=True):
         self.max_suffix_length = max_suffix_length
         self.min_suffix_count = min_suffix_count
         self.min_impurity = min_impurity
         self.threshold = threshold
         self.min_suffix_to_guess = min_suffix_to_guess
+        self.symbols_to_remove = symbols_to_remove
+        self.allow_spaces = allow_spaces
 
     @property
     def root(self):
@@ -105,6 +108,8 @@ class SuffixGuesser:
             weights = [1.0] * len(indexes)
         curr = self.root
         for i, a in enumerate(word):
+            if a in self.symbols_to_remove:
+                continue
             if a not in curr.children:
                 curr.children[a] = len(self)
                 self.trie_.append(TrieNode(curr))
@@ -125,6 +130,8 @@ class SuffixGuesser:
         """
         curr = 0
         for i, a in enumerate(word[:-min(len(word), self.max_suffix_length)-1:-1]):
+            if a in self.symbols_to_remove:
+                continue
             node = self.trie_[curr]
             child = node.children.get(a)
             if child is not None:
@@ -149,7 +156,9 @@ class SuffixGuesser:
                     curr_tags_count[tag] += 1
             curr_suffixes = set()
             for form, tags in forms.items():
-                form = "^" + form
+                if " " in form and not self.allow_spaces:
+                    continue
+                form = "^" + "".join(x for x in form if x not in self.symbols_to_remove)
                 weights = [1.0 / curr_tags_count[tag] for tag in tags] if build else None
                 tags = [self._get_tag_index(tag) for tag in tags]
                 count_start = self.INF if "" in curr_suffixes else 0
@@ -167,10 +176,9 @@ class SuffixGuesser:
         for j, (lemma, forms) in enumerate(data):
             if j % 1000 == 0:
                 print(j, lemma, end=" ")
-            print("")
             curr_forms_data = defaultdict(set)
             for form, tags in forms.items():
-                form = "^" + form
+                form = "^" + "".join(x for x in form if x not in self.symbols_to_remove)
                 tags = [self._get_tag_index(tag) for tag in tags]
                 index = self.find_node(form)
                 curr_forms_data[index].update(tags)
@@ -179,6 +187,7 @@ class SuffixGuesser:
                 curr.exact_count += 1
                 for tag in tags:
                     curr.exact_class_counts[tag] += 1
+        print("")
         for node in self.trie_:
             if node.exact_count > 0:
                 node.probs = {label: count / node.exact_count
@@ -230,6 +239,7 @@ class SuffixGuesser:
     def predict(self, word):
         curr = self.root
         length = 0
+        word = "^" + "".join(x for x in word if x not in self.symbols_to_remove)
         for a in word[::-1]:
             child = curr.children.get(a)
             if child is not None:
@@ -275,19 +285,20 @@ def impurity_score(count, total, parent_count, parent_total):
     return score
 
 def test():
-    infile = "/home/alexeysorokin/data/Data/UniMorph/hungarian"
+    infile = "/home/alexeysorokin/data/Data/UniMorph/belarusian"
     data = read_unimorph_infile(infile, by_lemmas=True, to_list=True)
     m = int(len(data) * 0.9)
-    guesser = SuffixGuesser(min_impurity=1e-3)
+    guesser = SuffixGuesser(min_impurity=1e-3, symbols_to_remove="́", allow_spaces=False)
     guesser.train(data)
-    guesser.save("models/guessers/hu")
-    guesser = load_guesser("models/guessers/hu")
-    for form, tags in data[m][1].items():
-        print(form)
-        print("\t".join(sorted(tags)))
-        for tag, value in sorted(guesser.predict(form)):
-            print("{}:{:.2f}".format(tag, value), end=" ")
-        print("\n")
+    guesser.save("models/guessers/be")
+    guesser = load_guesser("models/guessers/be")
+    print(guesser.predict("інвеставаць"))
+    # for form, tags in data[m+1][1].items():
+    #     print(form)
+    #     print("\t".join(sorted(tags)))
+    #     for tag, value in sorted(guesser.predict(form)):
+    #         print("{}:{:.2f}".format(tag, value), end=" ")
+    #     print("\n")
 
 if __name__ == "__main__":
     test()

@@ -12,6 +12,7 @@ from neural_tagging.suffix_guesser import load_guesser
 from neural_LM.UD_preparation.extract_tags_from_UD import make_UD_pos_and_tag
 from read import read_unimorph_infile
 
+flog = open("neural_tagging/dump/log_ins.out", "w", encoding="utf8")
 
 def read_ud_infile(infile):
     answer = defaultdict(lambda: defaultdict(int))
@@ -130,12 +131,13 @@ class UnimorphVectorizer(GuessingVectorizer):
 
 class MatchingVectorizer(GuessingVectorizer):
 
-    def __init__(self, guesser=None, threshold=0.5,
+    def __init__(self, guesser=None, guessed_weight=0.5, threshold=0.5,
                  pos_count_threshold=100, count_threshold=10,
                  pos_prob_threshold=0.5, prob_threshold=0.9,
                  significance_threshold=0.001, key_significance_threshold=0.001,
                  max_ud_tags_number=25, verbose=0):
         super().__init__(guesser, threshold)
+        self.guessed_weight = guessed_weight
         self.pos_count_threshold = pos_count_threshold
         self.count_threshold = count_threshold
         self.pos_prob_threshold = pos_prob_threshold
@@ -182,14 +184,25 @@ class MatchingVectorizer(GuessingVectorizer):
         uni_ud_pos_counts = defaultdict(lambda: defaultdict(int))
         unimorph_ud_pairs = []
         for word, curr_ud_tags in ud_data.items():
-            curr_unimorph_tags = unimorph_data.get(word)
-            if curr_unimorph_tags is None:
+            curr_unimorph_tags = unimorph_data.get(word, [])
+            max_weight = 1.0 if len(curr_unimorph_tags) > 0 else self.guessed_weight
+            curr_unimorph_weights = [1.0] * len(curr_unimorph_tags)
+            if self.guesser_ is not None:
+                guessed_tags = [tag for tag, value in self.guesser_.predict(word) if value >= self.threshold]
+                for tag in guessed_tags:
+                    if tag not in curr_unimorph_tags:
+                        curr_unimorph_tags.append(tag)
+                        curr_unimorph_weights.append(self.guessed_weight)
+            if len(curr_unimorph_tags) == 0:
                 continue
             # выделение признаков
             curr_unimorph_tags = [elem.split(";") for elem in curr_unimorph_tags]
             curr_unimorph_tags = [(elem[0], elem[1:]) for elem in curr_unimorph_tags]
-            curr_unimorph_pos_tags = set(elem[0] for elem in curr_unimorph_tags)
-            curr_unimorph_feats = set(feat for elem in curr_unimorph_tags for feat in elem[1])
+            curr_unimorph_pos_tags, curr_unimorph_feats = defaultdict(float), defaultdict(float)
+            for (pos, feats), weight in zip(curr_unimorph_tags, curr_unimorph_weights):
+                curr_unimorph_pos_tags[pos] = max(curr_unimorph_pos_tags[pos], weight)
+                for feat in feats:
+                    curr_unimorph_feats[feat] = max(curr_unimorph_feats[feat], weight)
 
             curr_ud_tags = [(make_UD_pos_and_tag(x)) + (count,) for x, count in curr_ud_tags.items()]
             curr_ud_tags = [(elem[0], (elem[1].split("|") if elem[1] != "_" else []), elem[2]) for elem in curr_ud_tags]
@@ -198,21 +211,35 @@ class MatchingVectorizer(GuessingVectorizer):
 
             x = 1
 
-            for curr_unimorph_pos in curr_unimorph_pos_tags:
-                unimorph_pos_tags[curr_unimorph_pos] += 1
-            for feat in curr_unimorph_feats:
-                unimorph_feats[feat] += 1
+            for curr_unimorph_pos, weight in curr_unimorph_pos_tags.items():
+                unimorph_pos_tags[curr_unimorph_pos] += weight
+            for feat, weight in curr_unimorph_feats.items():
+                unimorph_feats[feat] += weight
             for ud_pos in curr_ud_pos_tags:
-                ud_pos_tags[ud_pos] += 1
+                ud_pos_tags[ud_pos] += max_weight
             for feat in curr_ud_feats:
-                ud_feats[feat] += 1
-            for x, y in product(curr_unimorph_pos_tags, curr_ud_pos_tags):
-                uni_ud_pos_counts[x][y] += 1
-            for x, y in product(curr_unimorph_feats, curr_ud_feats):
-                uni_ud_tag_counts[x][y] += 1
+                ud_feats[feat] += max_weight
+            for (x, weight), y in product(curr_unimorph_pos_tags.items(), curr_ud_pos_tags):
+                uni_ud_pos_counts[x][y] += weight
+            for (x, weight), y in product(curr_unimorph_feats.items(), curr_ud_feats):
+                uni_ud_tag_counts[x][y] += weight
 
             for ud_tag in curr_ud_tags:
-                unimorph_ud_pairs.append([curr_unimorph_tags, ud_tag])
+                unimorph_ud_pairs.append([curr_unimorph_tags, ud_tag, curr_unimorph_weights])
+                # if "Case=Ins" in ud_tag[1]:
+                #     flog.write("{}\t{} {}\n".format(word, ud_tag[0], "|".join(ud_tag[1])))
+                #     for tag, weight in zip(curr_unimorph_tags, curr_unimorph_weights):
+                #         flog.write("{} {}\t{}\n".format(tag[0], ";".join(tag[1]), weight))
+                #     flog.write("\n")
+
+            if all("Case=Ins" not in elem[1] for elem in curr_ud_tags):
+                if any("INS" in tag[1] for tag in curr_unimorph_tags):
+                    flog.write("{}\n".format(word))
+                    for pos, tag, _ in curr_ud_tags:
+                        flog.write("{}\t{}\n".format(pos, "|".join(tag)))
+                    for tag, weight in zip(curr_unimorph_tags, curr_unimorph_weights):
+                        flog.write("{} {}\t{}\n".format(tag[0], ";".join(tag[1]), weight))
+                    flog.write("\n")
         # нормализация
         x = 1
         for uni_pos, curr_data in uni_ud_pos_counts.items():
@@ -222,9 +249,9 @@ class MatchingVectorizer(GuessingVectorizer):
             for ud_feat, count in curr_data.items():
                 curr_data[ud_feat] /= unimorph_feats[uni_feat]
         # выделение правильных соответствий
-        for i, (curr_unimorph_tags, ud_tag) in enumerate(unimorph_ud_pairs):
+        for i, (curr_unimorph_tags, ud_tag, weights) in enumerate(unimorph_ud_pairs):
             if len(curr_unimorph_tags) == 1:
-                unimorph_ud_pairs[i] = (curr_unimorph_tags[0], ud_tag)
+                unimorph_ud_pairs[i] = (curr_unimorph_tags[0], ud_tag, weights[0])
                 continue
             best_score, best_index = np.inf, None
             for j, (uni_pos, uni_feats) in enumerate(curr_unimorph_tags):
@@ -236,9 +263,13 @@ class MatchingVectorizer(GuessingVectorizer):
                         else:
                             feat_score = max(uni_ud_tag_counts[uni_feat][ud_feat] for ud_feat in ud_tag[1])
                         score -= np.log(feat_score)
+                        if i == 460:
+                            print(j, uni_feat, "{:.2f}".format(feat_score), end="\t")
+                if i == 460:
+                    print("{:.2f}".format(score))
                 if score < best_score:
                     best_score, best_index = score, j
-            unimorph_ud_pairs[i] = (curr_unimorph_tags[best_index], ud_tag)
+            unimorph_ud_pairs[i] = (curr_unimorph_tags[best_index], ud_tag, weights[best_index])
         # сохраняем признаки и их кодировку
         all_tags = [unimorph_pos_tags, ud_pos_tags, unimorph_feats, ud_feats]
         all_tag_codes = [dict() for _ in range(4)]
@@ -248,18 +279,18 @@ class MatchingVectorizer(GuessingVectorizer):
         unimorph_pos_tags, ud_pos_tags, unimorph_feats, ud_feats = all_tags
         uni_pos_codes, ud_pos_codes, uni_feat_codes, ud_feat_codes = all_tag_codes
         # составление матриц сопряжённости
-        uni_ud_pos_matrix = np.zeros(shape=(len(unimorph_pos_tags), len(ud_pos_tags)), dtype=int)
-        uni_ud_tag_matrix = np.zeros(shape=(len(unimorph_feats), len(ud_feats)), dtype=int)
-        uni_feats_counts = np.zeros_like(unimorph_feats, dtype=int)
-        ud_feats_counts = np.zeros_like(ud_feats, dtype=int)
-        for (uni_pos, curr_uni_feats), (ud_pos, curr_ud_feats, count) in unimorph_ud_pairs:
+        uni_ud_pos_matrix = np.zeros(shape=(len(unimorph_pos_tags), len(ud_pos_tags)), dtype=float)
+        uni_ud_tag_matrix = np.zeros(shape=(len(unimorph_feats), len(ud_feats)), dtype=float)
+        uni_feats_counts = np.zeros_like(unimorph_feats, dtype=float)
+        ud_feats_counts = np.zeros_like(ud_feats, dtype=float)
+        for (uni_pos, curr_uni_feats), (ud_pos, curr_ud_feats, count), weight in unimorph_ud_pairs:
             uni_pos_code, ud_pos_code = uni_pos_codes[uni_pos], ud_pos_codes[ud_pos]
-            uni_ud_pos_matrix[uni_pos_code,ud_pos_code] += 1
+            uni_ud_pos_matrix[uni_pos_code,ud_pos_code] += weight
             curr_uni_feats = np.array([uni_feat_codes[x] for x in curr_uni_feats], dtype=int)
             curr_ud_feats = np.array([ud_feat_codes[x] for x in curr_ud_feats], dtype=int)
-            uni_ud_tag_matrix[curr_uni_feats[:,None], curr_ud_feats[None, :]] += 1
-            uni_feats_counts[curr_uni_feats] += 1
-            ud_feats_counts[curr_ud_feats] += 1
+            uni_ud_tag_matrix[curr_uni_feats[:,None], curr_ud_feats[None, :]] += weight
+            uni_feats_counts[curr_uni_feats] += weight
+            ud_feats_counts[curr_ud_feats] += weight
         # извлечение соответствующих пар
         possible_pos_pairs = self.extract_frequent(
             uni_ud_pos_matrix, mode="pos", to_print=(unimorph_pos_tags, ud_pos_tags))
@@ -408,9 +439,10 @@ class MatchingVectorizer(GuessingVectorizer):
 
 
 if __name__ == '__main__':
-    unimorph_infile = "/home/alexeysorokin/data/Data/UniMorph/romanian"
-    ud_infile = '/home/alexeysorokin/data/Data/UD2.0/UD_Romanian/ro-ud-train.conllu'
-    matcher = MatchingVectorizer(verbose=1, guesser="neural_tagging/dump/guessers/romanian.guess")
+    unimorph_infile = "/home/alexeysorokin/data/Data/UniMorph/belarusian"
+    ud_infile = '/home/alexeysorokin/data/Data/UD2.3/UD_Belarusian-HSE/be_hse-ud-train.conllu'
+    matcher = MatchingVectorizer(verbose=0, guesser="neural_tagging/models/guessers/be")
     matcher.train(unimorph_infile, ud_infile)
-    print(matcher["comunici"])
+    flog.close()
+    # print(matcher["comunici"])
     # print(matcher["gráfnak"])
