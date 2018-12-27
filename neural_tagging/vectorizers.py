@@ -12,7 +12,7 @@ from neural_tagging.suffix_guesser import load_guesser
 from neural_LM.UD_preparation.extract_tags_from_UD import make_UD_pos_and_tag
 from read import read_unimorph_infile
 
-flog = open("neural_tagging/dump/log_ins.out", "w", encoding="utf8")
+flog = open("neural_tagging/dump/log_words.out", "w", encoding="utf8")
 
 def read_ud_infile(infile):
     answer = defaultdict(lambda: defaultdict(int))
@@ -146,6 +146,7 @@ class MatchingVectorizer(GuessingVectorizer):
         self.key_significance_threshold = key_significance_threshold
         self.max_ud_tags_number = max_ud_tags_number
         self.verbose = verbose
+        self.epsilon = 0.01
 
     def train(self, unimorph_infile, ud_infile, save_file=None):
         unimorph_data = read_unimorph_infile(unimorph_infile)
@@ -168,86 +169,144 @@ class MatchingVectorizer(GuessingVectorizer):
                 curr_tags.update(ud_codes)
             if len(curr_tags) > 0:
                 self.word_codes_[word] = list(curr_tags)
-        with open("log_1.out", "w", encoding="utf8") as fout:
-            for key, values in sorted(self.uni_to_ud_.items()):
-                for value in values:
-                    fout.write("{}\t{}\n".format(self.unimorph_tags_[key], self.ud_tags_[value]))
-                fout.write("\n")
+        # with open("log_1.out", "w", encoding="utf8") as fout:
+        #     for key, values in sorted(self.uni_to_ud_.items()):
+        #         for value in values:
+        #             fout.write("{}\t{}\n".format(self.unimorph_tags_[key], self.ud_tags_[value]))
+        #         fout.write("\n")
         return self
 
-    def make_feat_matches(self, unimorph_data, ud_data):
-        # первый проход: считаем вероятности uni_feat -> ud_feat
-        # и собираем значения признаков
-        unimorph_pos_tags, ud_pos_tags = defaultdict(int), defaultdict(int)
-        unimorph_feats, ud_feats = defaultdict(int), defaultdict(int)
-        uni_ud_tag_counts = defaultdict(lambda: defaultdict(int))
-        uni_ud_pos_counts = defaultdict(lambda: defaultdict(int))
-        unimorph_ud_pairs = []
+    def _make_uni_ud_pairs(self, unimorph_data, ud_data):
+        answer = []
         for word, curr_ud_tags in ud_data.items():
+            curr_ud_tags = [(make_UD_pos_and_tag(x)) + (count,) for x, count in curr_ud_tags.items()]
+            curr_ud_tags = [(elem[0], (elem[1].split("|") if elem[1] != "_" else []), elem[2])
+                            for elem in curr_ud_tags]
             curr_unimorph_tags = unimorph_data.get(word, [])
-            max_weight = 1.0 if len(curr_unimorph_tags) > 0 else self.guessed_weight
+            # max_weight = 1.0 if len(curr_unimorph_tags) > 0 else self.guessed_weight
             curr_unimorph_weights = [1.0] * len(curr_unimorph_tags)
             if self.guesser_ is not None:
                 guessed_tags = [tag for tag, value in self.guesser_.predict(word) if value >= self.threshold]
-                for tag in guessed_tags:
-                    if tag not in curr_unimorph_tags:
-                        curr_unimorph_tags.append(tag)
-                        curr_unimorph_weights.append(self.guessed_weight)
+                if len(guessed_tags) <= 3:
+                    for tag in guessed_tags:
+                        if tag not in curr_unimorph_tags:
+                            curr_unimorph_tags.append(tag)
+                            curr_unimorph_weights.append(self.guessed_weight)
             if len(curr_unimorph_tags) == 0:
                 continue
             # выделение признаков
             curr_unimorph_tags = [elem.split(";") for elem in curr_unimorph_tags]
             curr_unimorph_tags = [(elem[0], elem[1:]) for elem in curr_unimorph_tags]
-            curr_unimorph_pos_tags, curr_unimorph_feats = defaultdict(float), defaultdict(float)
-            for (pos, feats), weight in zip(curr_unimorph_tags, curr_unimorph_weights):
-                curr_unimorph_pos_tags[pos] = max(curr_unimorph_pos_tags[pos], weight)
-                for feat in feats:
-                    curr_unimorph_feats[feat] = max(curr_unimorph_feats[feat], weight)
-
-            curr_ud_tags = [(make_UD_pos_and_tag(x)) + (count,) for x, count in curr_ud_tags.items()]
-            curr_ud_tags = [(elem[0], (elem[1].split("|") if elem[1] != "_" else []), elem[2]) for elem in curr_ud_tags]
-            curr_ud_pos_tags = set(elem[0] for elem in curr_ud_tags)
-            curr_ud_feats = set(feat for elem in curr_ud_tags for feat in elem[1])
-
-            x = 1
-
-            for curr_unimorph_pos, weight in curr_unimorph_pos_tags.items():
-                unimorph_pos_tags[curr_unimorph_pos] += weight
-            for feat, weight in curr_unimorph_feats.items():
-                unimorph_feats[feat] += weight
-            for ud_pos in curr_ud_pos_tags:
-                ud_pos_tags[ud_pos] += max_weight
-            for feat in curr_ud_feats:
-                ud_feats[feat] += max_weight
-            for (x, weight), y in product(curr_unimorph_pos_tags.items(), curr_ud_pos_tags):
-                uni_ud_pos_counts[x][y] += weight
-            for (x, weight), y in product(curr_unimorph_feats.items(), curr_ud_feats):
-                uni_ud_tag_counts[x][y] += weight
-
             for ud_tag in curr_ud_tags:
-                unimorph_ud_pairs.append([curr_unimorph_tags, ud_tag, curr_unimorph_weights])
-                # if "Case=Ins" in ud_tag[1]:
-                #     flog.write("{}\t{} {}\n".format(word, ud_tag[0], "|".join(ud_tag[1])))
-                #     for tag, weight in zip(curr_unimorph_tags, curr_unimorph_weights):
-                #         flog.write("{} {}\t{}\n".format(tag[0], ";".join(tag[1]), weight))
-                #     flog.write("\n")
+                answer.append((curr_unimorph_tags, ud_tag[:2], curr_unimorph_weights))
+                for curr_uni_tag, weight in zip(curr_unimorph_tags, curr_unimorph_weights):
+                    flog.write("{}\t{};{}\t{} {}\t{}\n".format(
+                        word, curr_uni_tag[0], ";".join(curr_uni_tag[1]),
+                        ud_tag[0], "|".join(ud_tag[1]), weight))
+        return answer
 
-            if all("Case=Ins" not in elem[1] for elem in curr_ud_tags):
-                if any("INS" in tag[1] for tag in curr_unimorph_tags):
-                    flog.write("{}\n".format(word))
-                    for pos, tag, _ in curr_ud_tags:
-                        flog.write("{}\t{}\n".format(pos, "|".join(tag)))
-                    for tag, weight in zip(curr_unimorph_tags, curr_unimorph_weights):
-                        flog.write("{} {}\t{}\n".format(tag[0], ";".join(tag[1]), weight))
-                    flog.write("\n")
+    def _make_counts(self, pairs):
+        counts = dict()
+        for key in ["uni_pos"]:
+            counts[key] = defaultdict(float)
+        for key in ["uni_ud_pos", "uni_feat", "ud_feat", "ud_key"]:
+            counts[key] = defaultdict(lambda: defaultdict(float))
+        for key in ["uni_ud_feat", "uni_ud_key"]:
+            counts[key] = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
+        for curr_uni_tags, (ud_pos, ud_feats), curr_weights in pairs:
+            max_weight = max(curr_weights)
+            # собираем unimorph-тэги по частям речи
+            uni_pos_weights = defaultdict(int)
+            uni_feats_by_pos = defaultdict(lambda: defaultdict(float))
+            for (uni_pos, uni_feats), weight in zip(curr_uni_tags, curr_weights):
+                uni_pos_weights[uni_pos] = max(uni_pos_weights[uni_pos], weight)
+                for feat in uni_feats:
+                    uni_feats_by_pos[uni_pos][feat] = max(uni_feats_by_pos[uni_pos][feat], weight)
+            # считаем статистики встречаемости
+            for pos, pos_feats in uni_feats_by_pos.items():
+                weight = uni_pos_weights[pos]
+                counts["uni_pos"][pos] += weight
+                counts["uni_ud_pos"][pos][ud_pos] += weight
+                for ud_feat in ud_feats:
+                    ud_key, ud_value = ud_feat.split("=")
+                    counts["ud_feat"][pos][ud_feat] += weight
+                    counts["ud_key"][pos][ud_key] += weight
+                for feat in pos_feats:
+                    counts["uni_feat"][pos][feat] += weight
+                    for ud_feat in ud_feats:
+                        ud_key, ud_value = ud_feat.split("=")
+                        counts["uni_ud_feat"][pos][feat][ud_feat] += weight
+                        counts["uni_ud_key"][pos][feat][ud_key] += weight
+        return counts
+
+    def _make_uni_ud_scores(self, counts):
+        pos_scores, tag_scores = dict(), dict()
+        for uni_pos, ud_pos_tags in counts["uni_ud_pos"].items():
+            uni_pos_count = counts["uni_pos"][uni_pos]
+            pos_scores[uni_pos] = dict()
+            for ud_pos, count in ud_pos_tags.items():
+                pos_scores[uni_pos][ud_pos] = -np.log(count / uni_pos_count)
+        for uni_pos, curr_counts in counts["uni_ud_feat"].items():
+            tag_scores[uni_pos] = dict()
+            for uni_feat, uni_ud_curr_counts in curr_counts.items():
+                curr_data = dict()
+                for ud_feat, ud_count in uni_ud_curr_counts.items():
+                    ud_key, ud_value = ud_feat.split("=")
+                    ud_key_count = counts["uni_ud_key"][uni_pos][uni_feat][ud_key]
+                    if ud_count < 5:
+                        continue
+                    first_score = ud_count / ud_key_count
+                    second_count = counts["ud_feat"][uni_pos][ud_feat] - ud_count
+                    second_key_count = counts["ud_key"][uni_pos][ud_key] - ud_key_count
+                    if counts["ud_key"][uni_pos][ud_key] < 10:
+                        continue
+                    if second_key_count > 0:
+                        second_score = second_count / second_key_count
+                    else:
+                        second_score = 0.0
+                    if second_score < 1.0:
+                        score = (first_score - second_score) / (1.0 -second_score)
+                    else:
+                        score = self.epsilon
+                    score = -np.log(max(score, self.epsilon))
+                    curr_data[ud_feat] = (ud_count, ud_key_count, second_count, second_key_count,
+                                          first_score, second_score, score)
+                tag_scores[uni_pos][uni_feat] = curr_data
+        with open("neural_tagging/dump/logs.out", "w", encoding="utf8") as fout:
+            for uni_pos, data in sorted(pos_scores.items()):
+                for ud_pos, score in sorted(data.items(), key=(lambda x: x[1])):
+                    fout.write("{}\t{}\t{:.2f}\n".format(ud_pos, uni_pos, score))
+            fout.write("\n\n")
+            for uni_pos, pos_data in sorted(tag_scores.items()):
+                for uni_feat, feat_data in sorted(pos_data.items()):
+                    for ud_feat, elem in sorted(feat_data.items(), key=(lambda x: x[-1][-1])):
+                        if elem[-1] > 1.5:
+                            break
+                        fout.write("{} {} {}\t{}\n".format(
+                            uni_pos, uni_feat, ud_feat, "{} {} {} {} {:.2f} {:.2f} {:.3f}".format(*elem)))
+        return (pos_scores, tag_scores)
+
+    def _disambiguate_uni_ud_pairs(self, pairs):
+        counts = self._make_counts(pairs)
+        scores = self._make_uni_ud_scores(counts)
+        sys.exit()
+
+    def make_feat_matches(self, unimorph_data, ud_data):
+        # первый проход: считаем вероятности uni_feat -> ud_feat
+        # и собираем значения признаков
+        unimorph_ud_pairs = self._make_uni_ud_pairs(unimorph_data, ud_data)
+        unimorph_ud_pairs = self._disambiguate_uni_ud_pairs(unimorph_ud_pairs)
+
+
         # нормализация
-        x = 1
         for uni_pos, curr_data in uni_ud_pos_counts.items():
             for ud_pos, count in curr_data.items():
                 curr_data[ud_pos] /= unimorph_pos_tags[uni_pos]
+                # curr_data[ud_pos] /= ud_pos_tags[ud_pos]
         for uni_feat, curr_data in uni_ud_tag_counts.items():
             for ud_feat, count in curr_data.items():
                 curr_data[ud_feat] /= unimorph_feats[uni_feat]
+                # curr_data[ud_feat] /= ud_feats[ud_feat]
         # выделение правильных соответствий
         for i, (curr_unimorph_tags, ud_tag, weights) in enumerate(unimorph_ud_pairs):
             if len(curr_unimorph_tags) == 1:
@@ -263,10 +322,10 @@ class MatchingVectorizer(GuessingVectorizer):
                         else:
                             feat_score = max(uni_ud_tag_counts[uni_feat][ud_feat] for ud_feat in ud_tag[1])
                         score -= np.log(feat_score)
-                        if i == 460:
-                            print(j, uni_feat, "{:.2f}".format(feat_score), end="\t")
-                if i == 460:
-                    print("{:.2f}".format(score))
+                        # if i == 460:
+                        #     print(j, uni_feat, "{:.2f}".format(feat_score), end="\t")
+                # if i == 460:
+                #     print("{:.2f}".format(score))
                 if score < best_score:
                     best_score, best_index = score, j
             unimorph_ud_pairs[i] = (curr_unimorph_tags[best_index], ud_tag, weights[best_index])
@@ -441,7 +500,8 @@ class MatchingVectorizer(GuessingVectorizer):
 if __name__ == '__main__':
     unimorph_infile = "/home/alexeysorokin/data/Data/UniMorph/belarusian"
     ud_infile = '/home/alexeysorokin/data/Data/UD2.3/UD_Belarusian-HSE/be_hse-ud-train.conllu'
-    matcher = MatchingVectorizer(verbose=0, guesser="neural_tagging/models/guessers/be")
+    matcher = MatchingVectorizer(verbose=1, prob_threshold=0.75,
+                                 guesser="neural_tagging/models/guessers/be")
     matcher.train(unimorph_infile, ud_infile)
     flog.close()
     # print(matcher["comunici"])
