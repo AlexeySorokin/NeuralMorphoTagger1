@@ -63,7 +63,7 @@ class SuffixGuesser:
 
     def __init__(self, max_suffix_length=8, min_suffix_count=10, min_impurity=1e-6,
                  threshold=0.5, min_suffix_to_guess=3, symbols_to_remove="",
-                 allow_spaces=True):
+                 allow_spaces=False):
         self.max_suffix_length = max_suffix_length
         self.min_suffix_count = min_suffix_count
         self.min_impurity = min_impurity
@@ -286,13 +286,19 @@ def impurity_score(count, total, parent_count, parent_total):
 
 def test():
     infile = "/home/alexeysorokin/data/Data/UniMorph/belarusian"
-    data = read_unimorph_infile(infile, by_lemmas=True, to_list=True)
+    data = read_unimorph_infile(infile, by_lemmas=True, to_list=True,
+                                forms_to_add={"V": "V;INF"}, pos_mapper=(lambda x: x.split(";")[0]))
     m = int(len(data) * 0.9)
-    guesser = SuffixGuesser(min_impurity=1e-3, symbols_to_remove="́", allow_spaces=False)
+    guesser = SuffixGuesser(min_impurity=1e-3, symbols_to_remove="́",
+                            allow_spaces=False, min_suffix_to_guess=2, threshold=0.4)
     guesser.train(data)
-    guesser.save("models/guessers/be")
-    guesser = load_guesser("models/guessers/be")
-    print(guesser.predict("інвеставаць"))
+    guesser.save("models/guessers/belarusian")
+    guesser = load_guesser("models/guessers/belarusian")
+    words = ["падтрымки"]
+    for word in words:
+        print(word)
+        for elem in guesser.predict(word):
+            print(elem)
     # for form, tags in data[m+1][1].items():
     #     print(form)
     #     print("\t".join(sorted(tags)))
