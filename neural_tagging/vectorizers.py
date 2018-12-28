@@ -1,4 +1,3 @@
-import sys
 from collections import defaultdict
 import ujson as json
 from itertools import product
@@ -10,26 +9,9 @@ from scipy.stats.contingency import chi2_contingency
 
 from neural_tagging.suffix_guesser import load_guesser
 from neural_LM.UD_preparation.extract_tags_from_UD import make_UD_pos_and_tag
-from read import read_unimorph_infile
+from read import read_unimorph_infile, read_ud_infile
 
-flog = open("neural_tagging/dump/log_words.out", "w", encoding="utf8")
-
-def read_ud_infile(infile):
-    answer = defaultdict(lambda: defaultdict(int))
-    with open(infile, "r", encoding="utf8") as fin:
-        for line in fin:
-            line = line.strip()
-            if line == "" or line[0] == "#":
-                continue
-            splitted = line.split("\t")
-            if not splitted[0].isdigit():
-                continue
-            word, lemma = splitted[1:3]
-            if lemma[0].islower():
-                word = word[0].lower() + word[1:]
-            tag = ",".join([splitted[3], splitted[5]]) if splitted[5] != "_" else splitted[3]
-            answer[word][tag] += 1
-    return answer
+# flog = open("neural_tagging/dump/log_words.out", "w", encoding="utf8")
 
 
 def extract_features(tag):
@@ -132,12 +114,15 @@ class UnimorphVectorizer(GuessingVectorizer):
 class MatchingVectorizer(GuessingVectorizer):
 
     def __init__(self, guesser=None, guessed_weight=0.5, threshold=0.5,
+                 source_forms_to_add=None, max_match_score=0.5,
                  pos_count_threshold=100, count_threshold=10,
                  pos_prob_threshold=0.5, prob_threshold=0.9,
                  significance_threshold=0.001, key_significance_threshold=0.001,
                  max_ud_tags_number=25, verbose=0):
         super().__init__(guesser, threshold)
         self.guessed_weight = guessed_weight
+        self.source_forms_to_add = source_forms_to_add or dict()
+        self.max_match_score = max_match_score
         self.pos_count_threshold = pos_count_threshold
         self.count_threshold = count_threshold
         self.pos_prob_threshold = pos_prob_threshold
@@ -149,7 +134,8 @@ class MatchingVectorizer(GuessingVectorizer):
         self.epsilon = 0.01
 
     def train(self, unimorph_infile, ud_infile, save_file=None):
-        unimorph_data = read_unimorph_infile(unimorph_infile)
+        unimorph_data = read_unimorph_infile(unimorph_infile, forms_to_add=self.source_forms_to_add,
+                                             pos_mapper=(lambda x: x.split(";")[0]))
         self._unimorph_data = unimorph_data
         unimorph_tags = {tag for tags in unimorph_data.values() for tag in tags}
         self.unimorph_tags_ = sorted(unimorph_tags)
@@ -178,6 +164,7 @@ class MatchingVectorizer(GuessingVectorizer):
 
     def _make_uni_ud_pairs(self, unimorph_data, ud_data):
         answer = []
+        flog = open("neural_tagging/dump/log_words.out", "w", encoding="utf8")
         for word, curr_ud_tags in ud_data.items():
             curr_ud_tags = [(make_UD_pos_and_tag(x)) + (count,) for x, count in curr_ud_tags.items()]
             curr_ud_tags = [(elem[0], (elem[1].split("|") if elem[1] != "_" else []), elem[2])
@@ -187,23 +174,45 @@ class MatchingVectorizer(GuessingVectorizer):
             curr_unimorph_weights = [1.0] * len(curr_unimorph_tags)
             if self.guesser_ is not None:
                 guessed_tags = [tag for tag, value in self.guesser_.predict(word) if value >= self.threshold]
-                if len(guessed_tags) <= 3:
-                    for tag in guessed_tags:
-                        if tag not in curr_unimorph_tags:
-                            curr_unimorph_tags.append(tag)
-                            curr_unimorph_weights.append(self.guessed_weight)
+                # if len(guessed_tags) <= 3:
+                for tag in guessed_tags:
+                    if tag not in curr_unimorph_tags:
+                        curr_unimorph_tags.append(tag)
+                        curr_unimorph_weights.append(self.guessed_weight)
             if len(curr_unimorph_tags) == 0:
                 continue
             # выделение признаков
             curr_unimorph_tags = [elem.split(";") for elem in curr_unimorph_tags]
             curr_unimorph_tags = [(elem[0], elem[1:]) for elem in curr_unimorph_tags]
             for ud_tag in curr_ud_tags:
-                answer.append((curr_unimorph_tags, ud_tag[:2], curr_unimorph_weights))
+                answer.append((word, curr_unimorph_tags, ud_tag[:2], curr_unimorph_weights))
                 for curr_uni_tag, weight in zip(curr_unimorph_tags, curr_unimorph_weights):
                     flog.write("{}\t{};{}\t{} {}\t{}\n".format(
                         word, curr_uni_tag[0], ";".join(curr_uni_tag[1]),
                         ud_tag[0], "|".join(ud_tag[1]), weight))
+        flog.close()
         return answer
+
+    def _make_codes(self, pairs):
+        data = [uni_pos, uni_feats, ud_pos, ud_feats] = [set() for _ in range(4)]
+        for word, curr_uni_tags, (curr_ud_pos, curr_ud_feats), curr_weights in pairs:
+            for curr_uni_pos, curr_uni_feats in curr_uni_tags:
+                uni_pos.add(curr_uni_pos)
+                uni_feats.update(curr_uni_feats)
+            ud_pos.add(curr_ud_pos)
+            ud_feats.update(curr_ud_feats)
+        attrs = ["uni_pos", "uni_feats", "ud_pos", "ud_feats"]
+        code_attrs = ["uni_pos_codes", "uni_feat_codes", "ud_pos_codes", "ud_feat_codes"]
+        for elem, attr, code_attr in zip(data, attrs, code_attrs):
+            elem = sorted(elem)
+            setattr(self, attr, elem)
+            setattr(self, code_attr, {x: i for i, x in enumerate(elem)})
+        self.ud_feats_by_keys = defaultdict(list)
+        for i, ud_feat in enumerate(self.ud_feats):
+            self.ud_feats_by_keys[ud_feat.split("=")[0]].append(i)
+        self.ud_feats_with_same_key = [self.ud_feats_by_keys[ud_feat.split("=")[0]]
+                                       for i, ud_feat in enumerate(self.ud_feats)]
+        return
 
     def _make_counts(self, pairs):
         counts = dict()
@@ -213,7 +222,7 @@ class MatchingVectorizer(GuessingVectorizer):
             counts[key] = defaultdict(lambda: defaultdict(float))
         for key in ["uni_ud_feat", "uni_ud_key"]:
             counts[key] = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
-        for curr_uni_tags, (ud_pos, ud_feats), curr_weights in pairs:
+        for _, curr_uni_tags, (ud_pos, ud_feats), curr_weights in pairs:
             max_weight = max(curr_weights)
             # собираем unimorph-тэги по частям речи
             uni_pos_weights = defaultdict(int)
@@ -226,17 +235,18 @@ class MatchingVectorizer(GuessingVectorizer):
             for pos, pos_feats in uni_feats_by_pos.items():
                 weight = uni_pos_weights[pos]
                 counts["uni_pos"][pos] += weight
+                counts["uni_pos"][pos] += weight
                 counts["uni_ud_pos"][pos][ud_pos] += weight
                 for ud_feat in ud_feats:
                     ud_key, ud_value = ud_feat.split("=")
-                    counts["ud_feat"][pos][ud_feat] += weight
-                    counts["ud_key"][pos][ud_key] += weight
+                    counts["ud_feat"][ud_pos][ud_feat] += weight
+                    counts["ud_key"][ud_pos][ud_key] += weight
                 for feat in pos_feats:
-                    counts["uni_feat"][pos][feat] += weight
+                    counts["uni_feat"][ud_pos][feat] += weight
                     for ud_feat in ud_feats:
                         ud_key, ud_value = ud_feat.split("=")
-                        counts["uni_ud_feat"][pos][feat][ud_feat] += weight
-                        counts["uni_ud_key"][pos][feat][ud_key] += weight
+                        counts["uni_ud_feat"][ud_pos][feat][ud_feat] += weight
+                        counts["uni_ud_key"][ud_pos][feat][ud_key] += weight
         return counts
 
     def _make_uni_ud_scores(self, counts):
@@ -252,13 +262,15 @@ class MatchingVectorizer(GuessingVectorizer):
                 curr_data = dict()
                 for ud_feat, ud_count in uni_ud_curr_counts.items():
                     ud_key, ud_value = ud_feat.split("=")
-                    ud_key_count = counts["uni_ud_key"][uni_pos][uni_feat][ud_key]
-                    if ud_count < 5:
+                    # ud_key_count = counts["uni_ud_key"][uni_pos][uni_feat][ud_key]
+                    ud_key_count = counts["ud_feat"][uni_pos][ud_feat]
+                    if ud_count < 5 and uni_feat.lower() != ud_value.lower():
                         continue
                     first_score = ud_count / ud_key_count
-                    second_count = counts["ud_feat"][uni_pos][ud_feat] - ud_count
+                    # second_count = counts["ud_feat"][uni_pos][ud_feat] - ud_count
+                    second_count = counts["uni_ud_key"][uni_pos][uni_feat][ud_key] - ud_count
                     second_key_count = counts["ud_key"][uni_pos][ud_key] - ud_key_count
-                    if counts["ud_key"][uni_pos][ud_key] < 10:
+                    if counts["ud_key"][uni_pos][ud_key] < 10 and uni_feat.lower() != ud_value.lower():
                         continue
                     if second_key_count > 0:
                         second_score = second_count / second_key_count
@@ -280,94 +292,85 @@ class MatchingVectorizer(GuessingVectorizer):
             for uni_pos, pos_data in sorted(tag_scores.items()):
                 for uni_feat, feat_data in sorted(pos_data.items()):
                     for ud_feat, elem in sorted(feat_data.items(), key=(lambda x: x[-1][-1])):
-                        if elem[-1] > 1.5:
-                            break
+                        if elem[-1] > 0.5 and uni_feat.lower() not in ud_feat.lower():
+                            continue
                         fout.write("{} {} {}\t{}\n".format(
                             uni_pos, uni_feat, ud_feat, "{} {} {} {} {:.2f} {:.2f} {:.3f}".format(*elem)))
         return (pos_scores, tag_scores)
 
+    def _make_coocc_score(self, uni_tag, ud_tag, scores):
+        uni_pos, uni_feats = uni_tag
+        ud_pos, ud_feats = ud_tag
+        pos_scores, feat_scores = scores
+        scores = [min(pos_scores[uni_pos][ud_pos], 3.0)]
+        for uni_feat in uni_feats:
+            feat_score = -np.log(self.epsilon)
+            for ud_feat in ud_feats:
+                if uni_feat.lower() in ud_feat.lower():
+                    feat_score = 0.0
+                    break
+                try:
+                    feat_score = min(feat_scores[ud_pos][uni_feat][ud_feat][-1], feat_score)
+                except KeyError:
+                    continue
+            scores.append(feat_score)
+        score = sum(scores) / len(scores)
+        if len(scores) > 1:
+            score = min(score, sum(scores[1:]) / (len(scores) - 1))
+        return score
+
     def _disambiguate_uni_ud_pairs(self, pairs):
         counts = self._make_counts(pairs)
         scores = self._make_uni_ud_scores(counts)
-        sys.exit()
+        flog_disambig = open("neural_tagging/dump/log_pairs.out", "w", encoding="utf8")
+        answer = []
+        for word, curr_uni_tags, ud_elem, curr_weights in pairs:
+            x = 1
+            curr_scores = [self._make_coocc_score(elem, ud_elem, scores) for elem in curr_uni_tags]
+            index, min_score = np.argmin(curr_scores), np.min(curr_scores)
+            if min_score < self.max_match_score:
+                answer.append((curr_uni_tags[index], ud_elem, curr_weights[index]))
+                flog_disambig.write("{}\t{};{}\t{} {}\t{:.2f}\t{}\n".format(
+                    word, curr_uni_tags[index][0], ",".join(curr_uni_tags[index][1]),
+                    ud_elem[0], "|".join(ud_elem[1]), min_score, curr_weights[index]))
+        flog_disambig.close()
+        return answer
+
+    def _make_contingency_matrices(self, unimorph_ud_pairs):
+        uni_ud_pos_matrix = np.zeros(shape=(len(self.uni_pos), len(self.ud_pos)), dtype=float)
+        uni_ud_tag_matrix = np.zeros(shape=(len(self.uni_feats), len(self.ud_feats)), dtype=float)
+        uni_feats_counts = np.zeros_like(self.uni_feats, dtype=float)
+        ud_feats_counts = np.zeros_like(self.ud_feats, dtype=float)
+        for (uni_pos, curr_uni_feats), (ud_pos, curr_ud_feats), weight in unimorph_ud_pairs:
+            uni_pos_code, ud_pos_code = self.uni_pos_codes[uni_pos], self.ud_pos_codes[ud_pos]
+            uni_ud_pos_matrix[uni_pos_code, ud_pos_code] += weight
+            curr_uni_feats = np.array([self.uni_feat_codes[x] for x in curr_uni_feats], dtype=int)
+            curr_ud_feats = np.array([self.ud_feat_codes[x] for x in curr_ud_feats], dtype=int)
+            uni_ud_tag_matrix[curr_uni_feats[:, None], curr_ud_feats[None, :]] += weight
+            uni_feats_counts[curr_uni_feats] += weight
+            ud_feats_counts[curr_ud_feats] += weight
+        return uni_ud_pos_matrix, uni_ud_tag_matrix, uni_feats_counts, ud_feats_counts
 
     def make_feat_matches(self, unimorph_data, ud_data):
         # первый проход: считаем вероятности uni_feat -> ud_feat
         # и собираем значения признаков
         unimorph_ud_pairs = self._make_uni_ud_pairs(unimorph_data, ud_data)
+        self._make_codes(unimorph_ud_pairs)
         unimorph_ud_pairs = self._disambiguate_uni_ud_pairs(unimorph_ud_pairs)
-
-
-        # нормализация
-        for uni_pos, curr_data in uni_ud_pos_counts.items():
-            for ud_pos, count in curr_data.items():
-                curr_data[ud_pos] /= unimorph_pos_tags[uni_pos]
-                # curr_data[ud_pos] /= ud_pos_tags[ud_pos]
-        for uni_feat, curr_data in uni_ud_tag_counts.items():
-            for ud_feat, count in curr_data.items():
-                curr_data[ud_feat] /= unimorph_feats[uni_feat]
-                # curr_data[ud_feat] /= ud_feats[ud_feat]
-        # выделение правильных соответствий
-        for i, (curr_unimorph_tags, ud_tag, weights) in enumerate(unimorph_ud_pairs):
-            if len(curr_unimorph_tags) == 1:
-                unimorph_ud_pairs[i] = (curr_unimorph_tags[0], ud_tag, weights[0])
-                continue
-            best_score, best_index = np.inf, None
-            for j, (uni_pos, uni_feats) in enumerate(curr_unimorph_tags):
-                score = -np.log(uni_ud_pos_counts[uni_pos][ud_tag[0]])
-                if len(ud_tag[1]) > 0:
-                    for uni_feat in uni_feats:
-                        if any(ud_feat.split("=")[1].lower() == uni_feat.lower() for ud_feat in ud_tag[1]):
-                            feat_score = 1.0
-                        else:
-                            feat_score = max(uni_ud_tag_counts[uni_feat][ud_feat] for ud_feat in ud_tag[1])
-                        score -= np.log(feat_score)
-                        # if i == 460:
-                        #     print(j, uni_feat, "{:.2f}".format(feat_score), end="\t")
-                # if i == 460:
-                #     print("{:.2f}".format(score))
-                if score < best_score:
-                    best_score, best_index = score, j
-            unimorph_ud_pairs[i] = (curr_unimorph_tags[best_index], ud_tag, weights[best_index])
-        # сохраняем признаки и их кодировку
-        all_tags = [unimorph_pos_tags, ud_pos_tags, unimorph_feats, ud_feats]
-        all_tag_codes = [dict() for _ in range(4)]
-        for i in range(4):
-            all_tags[i] = sorted(all_tags[i])
-            all_tag_codes[i] = {tag: code for code, tag in enumerate(all_tags[i])}
-        unimorph_pos_tags, ud_pos_tags, unimorph_feats, ud_feats = all_tags
-        uni_pos_codes, ud_pos_codes, uni_feat_codes, ud_feat_codes = all_tag_codes
         # составление матриц сопряжённости
-        uni_ud_pos_matrix = np.zeros(shape=(len(unimorph_pos_tags), len(ud_pos_tags)), dtype=float)
-        uni_ud_tag_matrix = np.zeros(shape=(len(unimorph_feats), len(ud_feats)), dtype=float)
-        uni_feats_counts = np.zeros_like(unimorph_feats, dtype=float)
-        ud_feats_counts = np.zeros_like(ud_feats, dtype=float)
-        for (uni_pos, curr_uni_feats), (ud_pos, curr_ud_feats, count), weight in unimorph_ud_pairs:
-            uni_pos_code, ud_pos_code = uni_pos_codes[uni_pos], ud_pos_codes[ud_pos]
-            uni_ud_pos_matrix[uni_pos_code,ud_pos_code] += weight
-            curr_uni_feats = np.array([uni_feat_codes[x] for x in curr_uni_feats], dtype=int)
-            curr_ud_feats = np.array([ud_feat_codes[x] for x in curr_ud_feats], dtype=int)
-            uni_ud_tag_matrix[curr_uni_feats[:,None], curr_ud_feats[None, :]] += weight
-            uni_feats_counts[curr_uni_feats] += weight
-            ud_feats_counts[curr_ud_feats] += weight
+        uni_ud_pos_matrix, uni_ud_tag_matrix, uni_feats_counts, ud_feats_counts =\
+            self._make_contingency_matrices(unimorph_ud_pairs)
         # извлечение соответствующих пар
-        possible_pos_pairs = self.extract_frequent(
-            uni_ud_pos_matrix, mode="pos", to_print=(unimorph_pos_tags, ud_pos_tags))
+        possible_pos_pairs = self.extract_frequent(uni_ud_pos_matrix, mode="pos")
         total_counts = (ud_feats_counts, uni_feats_counts, len(unimorph_ud_pairs))
-        ud_feat_keys = defaultdict(list)
-        for i, elem in enumerate(ud_feats):
-            key, value = elem.split("=")
-            ud_feat_keys[key].append(i)
-        possible_tag_pairs = self.extract_frequent(uni_ud_tag_matrix, total_counts=total_counts,
-                                                   keys=ud_feat_keys, to_print=(unimorph_feats, ud_feats))
-        possible_pos_pairs = {unimorph_pos_tags[i]: [(ud_pos_tags[j], score) for j, score in value]
+        possible_tag_pairs = self.extract_frequent(uni_ud_tag_matrix, total_counts=total_counts, axis=[1])
+        possible_pos_pairs = {self.uni_pos[i]: [(self.ud_pos[j], score) for j, score in value]
                               for i, value in possible_pos_pairs.items()}
-        possible_tag_pairs = {unimorph_feats[i]: [(ud_feats[j], score) for j, score in value]
+        possible_tag_pairs = {self.uni_feats[i]: [(self.ud_feats[j], score) for j, score in value]
                               for i, value in possible_tag_pairs.items()}
         return possible_pos_pairs, possible_tag_pairs
 
-    def extract_frequent(self, matrix, mode="tag", axis=None,
-                         total_counts=None, keys=None, to_print=None):
+    def extract_frequent(self, matrix, mode="tag", axis=None, total_counts=None, to_print=None):
         m, n = matrix.shape
         if axis is None:
             axis = [0, 1]
@@ -377,14 +380,13 @@ class MatchingVectorizer(GuessingVectorizer):
         if total_counts is None:
             total_counts = [np.sum(matrix, axis=axe) for axe in range(np.ndim(matrix))]
             total_counts.append(np.sum(matrix))
-        if keys is not None:
-            reverse_keys = {index: indexes for indexes in keys.values() for index in indexes}
-            # reverse_keys = None
-            if to_print is not None:
-                self.row_names = to_print[0]
-            are_keys_significant = self._find_significant_keys(matrix, total_counts[0], keys)
+        if mode == "tag":
+            reverse_keys = self.ud_feats_with_same_key
+            to_print = (self.uni_feats, self.ud_feats)
+            are_keys_significant = self._find_significant_keys(
+                matrix, total_counts[0], keys=self.ud_feats_by_keys, row_names=self.uni_feats)
         else:
-            reverse_keys = None
+            reverse_keys, to_print = None, (self.uni_pos, self.ud_pos)
             are_keys_significant = np.ones_like(matrix, dtype=bool)
         prob_threshold = self.prob_threshold if mode == "tag" else self.pos_prob_threshold
         count_threshold = self.count_threshold if mode == "tag" else self.pos_count_threshold
@@ -392,10 +394,7 @@ class MatchingVectorizer(GuessingVectorizer):
             threshold = total_counts[axe] * prob_threshold
             threshold = np.expand_dims(threshold, axis=axe)
             are_frequent.append((matrix >= np.maximum(threshold, count_threshold)))
-        are_frequent = np.max(are_frequent, axis=0)
-        are_frequent *= are_keys_significant
-        # mask = np.expand_dims((np.sum(matrix, axis=1) >= self.count_threshold), axis=1)
-        # are_frequent *= mask
+        are_frequent = np.max(are_frequent, axis=0) * are_keys_significant
         answer = defaultdict(list)
         for i, j in zip(*np.nonzero(are_frequent)):
             if reverse_keys is not None:
@@ -415,13 +414,13 @@ class MatchingVectorizer(GuessingVectorizer):
                 if score < self.significance_threshold:
                     answer[i].append((j, score))
             except:
-                pass
+                continue
             if to_print is not None and self.verbose:
                 print("{} {}".format(to_print[0][i], to_print[1][j], score), end=" ")
                 print(" ".join(str(x) for x in np.ravel(curr_matrix)), "{:.4f}".format(score))
         return answer
 
-    def _find_significant_keys(self, matrix, total_counts, keys):
+    def _find_significant_keys(self, matrix, total_counts, keys, row_names=None):
         answer = np.zeros_like(matrix, dtype=bool)
         for key, indexes in keys.items():
             possible_rows = np.where(np.max(matrix[:,indexes], axis=1) >= self.count_threshold)[0]
@@ -430,8 +429,8 @@ class MatchingVectorizer(GuessingVectorizer):
                 curr_matrix = [matrix[r, indexes], total_counts[indexes] - matrix[r, indexes]]
                 try:
                     score = chi2_contingency(curr_matrix)[1]
-                    if hasattr(self, "row_names") and self.verbose:
-                        print(self.row_names[r], key, "{:.4f}".format(score))
+                    if row_names is not None and self.verbose:
+                        print(row_names[r], key, "{:.4f}".format(score))
                     if score < self.key_significance_threshold:
                         answer[r, indexes] = True
                 except:
@@ -499,10 +498,17 @@ class MatchingVectorizer(GuessingVectorizer):
 
 if __name__ == '__main__':
     unimorph_infile = "/home/alexeysorokin/data/Data/UniMorph/belarusian"
-    ud_infile = '/home/alexeysorokin/data/Data/UD2.3/UD_Belarusian-HSE/be_hse-ud-train.conllu'
-    matcher = MatchingVectorizer(verbose=1, prob_threshold=0.75,
-                                 guesser="neural_tagging/models/guessers/be")
-    matcher.train(unimorph_infile, ud_infile)
-    flog.close()
-    # print(matcher["comunici"])
+    ud_infiles = ['/home/alexeysorokin/data/Data/UD2.3/UD_Belarusian-HSE/be_hse-ud-train.conllu',
+                  '/home/alexeysorokin/data/Data/UD2.3/UD_Belarusian-HSE/be_hse-ud-dev.conllu']
+    matcher = MatchingVectorizer(verbose=1, prob_threshold=0.75, pos_count_threshold=50,
+                                 threshold=0.4, guessed_weight=1.0,
+                                 source_forms_to_add={"V": "V;INF"},
+                                 guesser="neural_tagging/models/guessers/belarusian")
+    matcher.train(unimorph_infile, ud_infiles)
+    # flog.close()
+    words = ["волю"]
+    for word in words:
+        print(word)
+        for elem in matcher[word]:
+            print(word, elem)
     # print(matcher["gráfnak"])
