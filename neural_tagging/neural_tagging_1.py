@@ -35,7 +35,7 @@ def load_tagger(infile):
         json_data = json.load(fin)
     args = {key: value for key, value in json_data.items()
             if not (key.endswith("_") or key.endswith("callback") or
-                    key in ["dump_file", "lm_file", "vectorizer_save_data"])}
+                    key in ["dump_file", "lm_file", "vectorizer_save_data", "tag_vectorizer_save_data"])}
     callbacks = []
     early_stopping_callback_data = json_data.get("early_stopping_callback")
     if early_stopping_callback_data is not None:
@@ -68,6 +68,7 @@ def load_tagger(infile):
     if tagger.use_lm and "lm_file" in json_data:
         tagger.lm_ = load_lm(json_data["lm_file"])
     # loading word vectorizers
+
     for cls, infile, dim in json_data.get("vectorizer_save_data", []):
         vectorizer = load_vectorizer(cls, infile)
         tagger.word_vectorizers.append([vectorizer, dim])
@@ -76,7 +77,7 @@ def load_tagger(infile):
         tagger._make_morpho_dict_indexes_func(tagger.morpho_dict_params["type"])
     # модель
     tagger.build()  # не работает сохранение модели, приходится сохранять только веса
-    tagger.model_.load_weights(json_data['dump_file'])
+    tagger.model_.load_weights(os.path.abspath(json_data['dump_file']))
     return tagger
 
 
@@ -264,9 +265,9 @@ class CharacterTagger:
             if not (attr.startswith("__") or inspect.ismethod(val) or
                     isinstance(getattr(CharacterTagger, attr, None), property) or
                     isinstance(val, np.ndarray) or isinstance(val, Vocabulary) or
-                    attr.isupper() or
-                    attr in ["callbacks", "model_", "_basic_model_",
-                             "warmup_model_", "_decoder_", "lm_",
+                    attr.isupper() or isinstance(val, kb.Function) or
+                    attr in ["callbacks", "model_", "_basic_model_", "warmup_model_",
+                             "_decoder_", "lm_",
                              "morpho_dict_indexes_func_", "word_tag_mapper_", "morpho_dict_",
                              "regularizer", "fusion_regularizer",
                              "word_vectorizers", "word_tag_vectorizers"]):
@@ -642,7 +643,7 @@ class CharacterTagger:
                 if predict_with_basic:
                     bucket_probs = bucket_basic_probs
             else:
-                bucket_probs = self.model_.predict(X_curr, batch_size=256)
+                bucket_probs = self.model_.predict(X_curr, batch_size=64)
                 bucket_basic_probs = [None] * len(bucket_indexes)
                 if isinstance(bucket_probs, list):
                     bucket_probs, bucket_basic_probs = bucket_probs
@@ -778,7 +779,6 @@ class CharacterTagger:
             basic_probs_by_groups.append(curr_basic_group_probs)
         return tags_by_groups, probs_by_groups, basic_probs_by_groups
 
-
     def _make_tag_embeddings(self, lm):
         # embeddings_weights.shape = (n_symbol_features, tag_embeddings_dim)
         embedding_weights = lm.get_embeddings_weights()
@@ -861,6 +861,7 @@ class CharacterTagger:
             outputs = pre_outputs
         self.model_ = Model(inputs, outputs)
         self.model_.compile(**compile_args)
+        self._embedder_ = kb.Function(basic_inputs + [kb.learning_phase()], [word_outputs, states])
         if hasattr(self, "lm_"):
             self._basic_model_ = kb.Function(basic_inputs + [kb.learning_phase()], decoder_inputs[:3])
             self._decoder_ = kb.Function(decoder_inputs + [kb.learning_phase()], [final_outputs])

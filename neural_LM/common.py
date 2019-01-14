@@ -174,11 +174,13 @@ def generate_data(X, indexes_by_buckets, output_symbols_number,
                   batch_size=None, use_last=True, has_answer=True,
                   shift_answer=False, shuffle=True, yield_weights=True,
                   duplicate_answer=False, fields_number=None,
-                  weights=None):
+                  fields_to_one_hot=None, weights=None):
     if weights is None:
         weights = np.ones(shape=(len(X)))
     if fields_number is None:
         fields_number = len(X[0]) - int(has_answer and not use_last)
+    if fields_to_one_hot is None:
+        fields_to_one_hot = []
     answer_index = 0 if use_last else -1 if has_answer else None
     if batch_size is None:
         batches_indexes = [(i, 0) for i in range(len(indexes_by_buckets))]
@@ -198,6 +200,7 @@ def generate_data(X, indexes_by_buckets, output_symbols_number,
             bucket_size = len(indexes_by_buckets[i])
             end = min(bucket_size, start + batch_size) if batch_size is not None else bucket_size
             bucket_indexes = indexes_by_buckets[i][start:end]
+            # TO DO: fix one-hot generation of data
             to_yield = [np.array([X[j][k] for j in bucket_indexes])
                         for k in range(fields_number)]
             if has_answer:

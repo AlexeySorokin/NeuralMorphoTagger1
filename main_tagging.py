@@ -3,6 +3,7 @@ import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 import json
 import copy
+import random
 from collections import defaultdict
 
 import numpy as np
@@ -168,9 +169,9 @@ def make_output(cls, test_data, test_labels, predictions, probs, basic_probs=Non
 
 if __name__ == '__main__':
     config = tf.ConfigProto()
-    config.gpu_options.per_process_gpu_memory_fraction = 0.5
+    config.gpu_options.per_process_gpu_memory_fraction = 0.4
     kbt.set_session(tf.Session(config=config))
-
+    random.seed(167)
     if len(sys.argv[1:]) != 1:
         sys.exit("Usage: main.py <config json file>")
     params = read_config(sys.argv[1])
@@ -186,7 +187,7 @@ if __name__ == '__main__':
         callbacks = None
     params["model_params"]["callbacks"] = callbacks
     params["predict_params"]["return_probs"] = True
-    if params["train_files"] is not None:
+    if params.get("to_train", True) and params["train_files"] is not None:
         cls = CharacterTagger(**params["model_params"])
         train_read_params = copy.deepcopy(params["read_params"])
         train_read_params.update(params["train_read_params"])

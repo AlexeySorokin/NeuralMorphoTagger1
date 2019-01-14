@@ -1,6 +1,6 @@
 import sys
 from collections import defaultdict
-
+import random
 
 WORD_COLUMN, POS_COLUMN, TAG_COLUMN = 1, 3, 5
 
@@ -114,7 +114,7 @@ def read_tags_infile(infile, read_words=False, to_lower=False,
                      append_case="first", wrap=False, attach_tokens=False,
                      word_column=WORD_COLUMN, pos_column=POS_COLUMN,
                      tag_column=TAG_COLUMN, read_only_words=False,
-                     return_source_words=False, max_sents=-1):
+                     return_source_words=False, max_sents=-1, to_shuffle=False):
     answer, curr_tag_sent, curr_word_sent = [], [], []
     source_answer, curr_source_sent = [], []
     with open(infile, "r", encoding="utf8") as fin:
@@ -130,7 +130,7 @@ def read_tags_infile(infile, read_words=False, to_lower=False,
                     answer.append(to_append)
                     source_answer.append(curr_source_sent)
                 curr_tag_sent, curr_word_sent = [], []
-                if len(answer) == max_sents:
+                if len(answer) == max_sents and not to_shuffle:
                     break
                 continue
             splitted = line.split("\t")
@@ -162,6 +162,13 @@ def read_tags_infile(infile, read_words=False, to_lower=False,
                 if word in POS_MAPPING:
                     word = POS_MAPPING[word]
                 tag_sent[j] += "{}token={}".format(sep, word)
+    if to_shuffle:
+        indexes = list(range(len(answer)))
+        random.shuffle(indexes)
+        answer = [answer[i] for i in indexes]
+        source_answer = [source_answer[i] for i in indexes]
+        if max_sents != -1:
+            answer, source_answer = answer[:max_sents], source_answer[:max_sents]
     if not read_words:
         answer = [elem[1] for elem in answer]
     if wrap:
