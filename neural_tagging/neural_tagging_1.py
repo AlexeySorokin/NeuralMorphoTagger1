@@ -471,11 +471,12 @@ class CharacterTagger:
             for j, x in enumerate(word[-m:], self.has_additional_inputs):
                 answer[i, j+1] = self.symbols_.toidx(x)
             answer[i, self.has_additional_inputs+m+1] = END
+        answer = np.expand_dims(answer, -1).tolist()
         if classes_number is not None:
-            answer = to_one_hot(answer, classes_number)
             if self.use_additional_symbol_features:
                 for i, L in enumerate(lengths):
-                    answer[i, 2:L+2, dataset_code] = 1
+                    for j in range(2, L+2):
+                        answer[i][j].append(dataset_code)
         return answer
 
     def _make_tags_vector(self, tags, bucket_length=None, func=None):
