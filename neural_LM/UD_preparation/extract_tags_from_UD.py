@@ -129,7 +129,7 @@ def read_tags_infile(infile, read_words=False, to_lower=False,
                                  else (curr_word_sent, curr_tag_sent))
                     answer.append(to_append)
                     source_answer.append(curr_source_sent)
-                curr_tag_sent, curr_word_sent = [], []
+                curr_tag_sent, curr_word_sent, curr_source_sent = [], [], []
                 if len(answer) == max_sents and not to_shuffle:
                     break
                 continue

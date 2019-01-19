@@ -609,10 +609,12 @@ class CharacterTagger:
                                   self.batch_size, use_last=False,
                                   duplicate_answer=self.use_lm,
                                   yield_weights=self.to_weigh_loss,
+                                  fields_to_one_hot={0: self.symbols_number_},
                                   weights=weights)
         dev_gen = generate_data(X_dev, dev_indexes_by_buckets, self.tags_number_,
                                 use_last=False, shuffle=False,
                                 duplicate_answer=self.use_lm,
+                                fields_to_one_hot={0: self.symbols_number_},
                                 yield_weights=self.to_weigh_loss)
         self.model_.fit_generator(
             train_gen, steps_per_epoch=train_steps, epochs=self.nepochs,
@@ -622,8 +624,8 @@ class CharacterTagger:
             self.model_.load_weights(model_file)
         return self
 
-    def predict(self, data, labels=None, beam_width=1,
-                return_probs=False, return_basic_probs=False,
+    def predict(self, data, labels=None, dataset_codes=None,
+                beam_width=1, return_probs=False, return_basic_probs=False,
                 predict_with_basic=False):
         if self.morpho_dict is not None and not hasattr(self, "word_tag_mapper_"):
             self._make_word_tag_mapper(data)
@@ -631,9 +633,12 @@ class CharacterTagger:
             self.transform(data, labels=labels, bucket_size=BUCKET_SIZE)
         answer, probs = [None] * len(data), [None] * len(data)
         basic_probs = [None] * len(data)
-        for k, (X_curr, bucket_indexes) in enumerate(zip(X_test[::-1], indexes_by_buckets[::-1])):
-            X_curr = [np.array([X_test[i][j] for i in bucket_indexes])
-                      for j in range(len(X_test[0])-int(labels is not None))]
+        fields_number = len(X_test[0])-int(labels is not None)
+        # for k, (curr_bucket, bucket_indexes) in enumerate(zip(X_test[::-1], indexes_by_buckets[::-1])):
+        for k, bucket_indexes in enumerate(indexes_by_buckets[::-1]):
+            X_curr = make_batch([X_test[i][:fields_number] for i in bucket_indexes], {0: self.symbols_number_})
+            # X_curr = [np.array([X_test[i][j] for i in bucket_indexes])
+            #           for j in range(len(X_test[0])-int(labels is not None))]
             if self.use_lm and labels is None:
                 if self.verbose > 0 and (k < 3 or k % 10 == 0):
                     print("Bucket {} of {} predicting".format(k+1, len(indexes_by_buckets)))
@@ -915,10 +920,10 @@ class CharacterTagger:
         for j in range(self.word_lstm_layers - 1):
             lstm_outputs = kl.Bidirectional(
                 kl.LSTM(self.word_lstm_units[j], return_sequences=True,
-                        dropout=self.lstm_dropout))(lstm_outputs)
+                        dropout=self.lstm_dropout, name="word_lstm_{}".format(j+1)))(lstm_outputs)
         lstm_outputs = kl.Bidirectional(
-            kl.LSTM(self.word_lstm_units[-1], return_sequences=True,
-                    dropout=self.lstm_dropout))(lstm_outputs)
+            kl.LSTM(self.word_lstm_units[-1], return_sequences=True, dropout=self.lstm_dropout,
+                    name="word_lstm_{}".format(self.word_lstm_layers)))(lstm_outputs)
         if hasattr(self, "tag_embeddings_"):
             pre_outputs = self.tag_embeddings_output_layer(lstm_outputs)
         else:
@@ -935,6 +940,12 @@ class CharacterTagger:
                              activity_regularizer=self.regularizer),
                 name="p")(lstm_outputs)
         return pre_outputs, lstm_outputs
+
+    def _freeze_output_network(self):
+        for layer in self.model_.layers:
+            if layer.name.startswith("word_lstm") or layer.name == "p":
+                layer.trainable = False
+        return
 
     def tag_embeddings_output_layer(self, lstm_outputs):
         outputs_embeddings = kl.TimeDistributed(

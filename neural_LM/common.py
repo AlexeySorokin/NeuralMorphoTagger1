@@ -171,11 +171,27 @@ class CustomCallback(Callback):
 
 
 def _make_many_hot_array(data, classes_number):
-    data, shape = np.ravel(data), np.shape(data)
-    answer = np.zeros(shape=(len(data), classes_number), dtype=np.int32)
-    for i, elem in enumerate(data):
+    flat_data, shape = np.ravel(data), np.shape(data)
+    if flat_data.dtype != "object":
+        flat_data = np.reshape(flat_data, (-1, 1))
+        shape = shape[:-1]
+    answer = np.zeros(shape=(len(flat_data), classes_number), dtype=np.int32)
+    for i, elem in enumerate(flat_data):
         answer[i, elem] = 1
     answer = answer.reshape(shape + (-1,))
+    return answer
+
+
+def make_batch(data, fields_to_one_hot=None):
+    if fields_to_one_hot is None:
+        fields_to_one_hot = dict()
+    fields_number = len(data[0])
+    answer = [None] * fields_number
+    for k in range(fields_number):
+        if k in fields_to_one_hot:
+            answer[k] = _make_many_hot_array([elem[k] for elem in data], fields_to_one_hot[k])
+        else:
+            answer[k] = np.array([elem[k] for elem in data])
     return answer
 
 def generate_data(X, indexes_by_buckets, output_symbols_number,
@@ -210,15 +226,7 @@ def generate_data(X, indexes_by_buckets, output_symbols_number,
             end = min(bucket_size, start + batch_size) if batch_size is not None else bucket_size
             bucket_indexes = indexes_by_buckets[i][start:end]
             # TO DO: fix one-hot generation of data
-            to_yield = [None] * fields_number
-            for k in range(fields_number):
-                if k in fields_to_one_hot:
-                    to_yield[k] = _make_many_hot_array(
-                        [X[j][k] for j in bucket_indexes], fields_to_one_hot[k])
-                else:
-                    to_yield[k] = [X[j][k] for j in bucket_indexes]
-            # to_yield = [np.array([X[j][k] for j in bucket_indexes])
-            #             for k in range(fields_number)]
+            to_yield = make_batch([X[j][:fields_number] for j in bucket_indexes], fields_to_one_hot)
             if has_answer:
                 indexes_to_yield = np.array([X[j][answer_index] for j in bucket_indexes])
                 if shift_answer:

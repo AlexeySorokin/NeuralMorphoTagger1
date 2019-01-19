@@ -17,7 +17,7 @@ from neural_LM import load_lm
 from neural_tagging.misc import TagNormalizer
 
 DEFAULT_NONE_PARAMS = ["model_file", "test_files", "outfiles", "train_files",
-                       "dev_files", "dump_file", "save_file", "lm_file",
+                       "dev_files", "dump_file", "save_file", "load_file", "lm_file",
                        "prediction_files", "comparison_files",
                        "gh_outfiles", "gh_comparison_files"]
 DEFAULT_PARAMS = {}
