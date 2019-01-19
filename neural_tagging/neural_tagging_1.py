@@ -115,7 +115,7 @@ class CharacterTagger:
                  morpho_dict_embeddings_size=256, word_vectorizers=None,
                  word_tag_vectorizers=None,
                  additional_inputs_number=0, additional_inputs_weight=0,
-                 use_additional_symbol_features=False,
+                 use_additional_symbol_features=False, transfer_warmup_epochs=0,
                  normalize_lm_embeddings=False, base_model_weight=0.25,
                  word_rnn = "cnn", min_char_count=1, char_embeddings_size=16,
                  char_conv_layers = 1, char_window_size = 5, char_filters = None,
@@ -144,6 +144,7 @@ class CharacterTagger:
         self.additional_inputs_number = additional_inputs_number
         self.additional_inputs_weight = additional_inputs_weight
         self.use_additional_symbol_features = use_additional_symbol_features
+        self.transfer_warmup_epochs = transfer_warmup_epochs
         self.normalize_lm_embeddings = normalize_lm_embeddings
         self.base_model_weight = base_model_weight
         self.word_rnn = word_rnn
@@ -359,19 +360,32 @@ class CharacterTagger:
 
     def transform(self, data, labels=None, pad=True, return_indexes=True,
                   buckets_number=None, bucket_size=None, join_buckets=True,
-                  dataset_codes=None):
+                  dataset_codes=None, join_datasets=True):
         if dataset_codes is None:
             dataset_codes = [0] * len(data)
-        lengths = [len(x)+2 for x in data]
-        if pad:
-            indexes, level_lengths = make_bucket_indexes(
-                lengths, buckets_number=buckets_number,
-                bucket_size=bucket_size, join_buckets=join_buckets)
+        if join_datasets:
+            indexes_by_datasets = [list(range(len(data)))]
         else:
-            indexes = [[i] for i in range(len(data))]
-            level_lengths = lengths
+            indexes_by_datasets = [[] for _ in range(self.additional_inputs_number + 1)]
+            for i, code in enumerate(dataset_codes):
+                indexes_by_datasets[code].append(i)
+        lengths = [[len(data[i])+2 for i in elem] for elem in indexes_by_datasets]
+        bucket_data = []
+        for dataset_index, (curr_lengths, curr_indexes) in enumerate(zip(lengths, indexes_by_datasets)):
+            if pad:
+                if len(curr_indexes) > 0:
+                    curr_indexes_by_buckets, curr_level_lengths = make_bucket_indexes(
+                        curr_lengths, buckets_number=buckets_number,
+                        bucket_size=bucket_size, join_buckets=join_buckets)
+                    curr_indexes_by_buckets = [[curr_indexes[index] for index in elem]
+                                               for elem in curr_indexes_by_buckets]
+            else:
+                curr_indexes_by_buckets = [[i] for i in curr_indexes]
+                curr_level_lengths = curr_lengths
+            for bucket_indexes, length in zip(curr_indexes_by_buckets, curr_level_lengths):
+                bucket_data.append((bucket_indexes, length, dataset_index))
         X = [None] * len(data)
-        for r, (bucket_indexes, bucket_length) in enumerate(zip(indexes, level_lengths)):
+        for r, (bucket_indexes, bucket_length, dataset_code) in enumerate(bucket_data):
             bucket_length += int(self.additional_inputs_number > 0)
             for i in bucket_indexes:
                 sent = data[i] if not self.reverse else data[i][::-1]
@@ -447,8 +461,9 @@ class CharacterTagger:
             #                     tag_indexes = self.morpho_dict_indexes_func_(tag)
             #                     curr_sent_tags[j][tag_indexes] = 1
             #         X[index].insert(insert_pos, curr_sent_tags)
+        indexes, datasets = [elem[0] for elem in bucket_data], [elem[2] for elem in bucket_data]
         if return_indexes:
-            return X, indexes
+            return X, indexes, datasets
         else:
             return X
 
@@ -501,7 +516,7 @@ class CharacterTagger:
         :return:
         """
         # vocabularies for symbols and tags
-        data_for_vocab, labels_for_vocab = data, labels
+        data_for_vocab, labels_for_vocab = data[:], labels[:]
         if additional_data is not None:
             for (elem, elem_labels) in zip(additional_data, additional_labels):
                 data_for_vocab += elem
@@ -542,11 +557,13 @@ class CharacterTagger:
                 data += add_dataset
                 dataset_codes += [code] * len(add_dataset)
                 labels += add_labels
-        X_train, indexes_by_buckets = self.transform(
-            data, labels, buckets_number=10, dataset_codes=dataset_codes)
+        X_train, indexes_by_buckets, dataset_codes_by_buckets = self.transform(
+            data, labels, buckets_number=10, dataset_codes=dataset_codes,
+            join_datasets=(self.transfer_warmup_epochs==0))
         if dev_data is not None:
-            X_dev, dev_indexes_by_buckets =\
-                self.transform(dev_data, dev_labels, bucket_size=BUCKET_SIZE)
+            X_dev, dev_indexes_by_buckets, _ =\
+                self.transform(dev_data, dev_labels, bucket_size=BUCKET_SIZE,
+                               join_datasets=(self.transfer_warmup_epochs==0))
         else:
             X_dev, dev_indexes_by_buckets = [None] * 2
         self.build()
@@ -554,12 +571,14 @@ class CharacterTagger:
             self.to_json(save_file, model_file, lm_file)
         self._train_on_data(X_train, indexes_by_buckets, X_dev,
                             dev_indexes_by_buckets, dataset_codes=dataset_codes,
-                            model_file=model_file)
+                            model_file=model_file,
+                            train_dataset_codes_by_buckets=dataset_codes_by_buckets)
         return self
 
     def _train_on_data(self, X, indexes_by_buckets, X_dev=None,
                        dev_indexes_by_buckets=None, model_file=None,
-                       dataset_codes=None):
+                       dataset_codes=None, train_dataset_codes_by_buckets=None,
+                       dev_dataset_codes_by_buckets=None):
         if dataset_codes is None:
             weights = np.ones(shape=(len(X)))
         else:
@@ -581,8 +600,10 @@ class CharacterTagger:
                 dev_indexes_by_buckets.append(curr_indexes[train_bucket_size:])
             else:
                 train_indexes_by_buckets.append(curr_indexes)
-        train_steps = sum((1 + (len(x)-1) // self.batch_size) for x in train_indexes_by_buckets)
-        dev_steps = len(dev_indexes_by_buckets)
+        if train_dataset_codes_by_buckets is None:
+            train_dataset_codes_by_buckets = [0] * len(train_indexes_by_buckets)
+        if dev_dataset_codes_by_buckets is None:
+            dev_dataset_codes_by_buckets = [0] * len(dev_indexes_by_buckets)
         # if hasattr(self, "lm_") and self.n_warmup_epochs > 0:
         #     fields_number = 1 + int(self.morpho_dict is not None)
         #     train_gen = generate_data(X, train_indexes_by_buckets, self.tags_number_,
@@ -605,31 +626,54 @@ class CharacterTagger:
                 self.callbacks.append(callback)
             else:
                 self.callbacks = [callback]
+        are_train_buckets_active = self._make_active_buckets(train_dataset_codes_by_buckets)
+        are_dev_buckets_active = self._make_active_buckets(dev_dataset_codes_by_buckets)
         train_gen = generate_data(X, train_indexes_by_buckets, self.tags_number_,
-                                  self.batch_size, use_last=False,
+                                  self.batch_size, epochs=self.nepochs,
+                                  active_buckets=are_train_buckets_active,
+                                  use_last=False,
                                   duplicate_answer=self.use_lm,
                                   yield_weights=self.to_weigh_loss,
                                   fields_to_one_hot={0: self.symbols_number_},
                                   weights=weights)
         dev_gen = generate_data(X_dev, dev_indexes_by_buckets, self.tags_number_,
+                                epochs=self.nepochs, active_buckets=are_dev_buckets_active,
                                 use_last=False, shuffle=False,
                                 duplicate_answer=self.use_lm,
                                 fields_to_one_hot={0: self.symbols_number_},
                                 yield_weights=self.to_weigh_loss)
-        self.model_.fit_generator(
-            train_gen, steps_per_epoch=train_steps, epochs=self.nepochs,
-            callbacks=self.callbacks, validation_data=dev_gen,
-            validation_steps=dev_steps, verbose=1)
+        for t in range(self.nepochs):
+            train_steps, dev_steps = 0, 0
+            for i in are_train_buckets_active[:,t].nonzero()[0]:
+                train_steps += (len(train_indexes_by_buckets[i]) + 1) // self.batch_size + 1
+            for i in are_dev_buckets_active[:,t].nonzero()[0]:
+                dev_steps += (len(dev_indexes_by_buckets[i]) + 1) // self.batch_size + 1
+            validation_data = dev_gen if dev_steps > 0 else None
+            self.model_.fit_generator(
+                train_gen, steps_per_epoch=train_steps, epochs=t+1,
+                callbacks=self.callbacks, validation_data=validation_data,
+                validation_steps=dev_steps, initial_epoch=t,
+                verbose=1)
         if model_file is not None:
             self.model_.load_weights(model_file)
         return self
+
+    def _make_active_buckets(self, bucket_dataset_codes):
+        are_buckets_active = np.ones(shape=(len(bucket_dataset_codes), self.nepochs), dtype=int)
+        if self.transfer_warmup_epochs > 0:
+            for i, code in enumerate(bucket_dataset_codes):
+                if code == 0:
+                    are_buckets_active[i, :self.transfer_warmup_epochs] = 0
+                else:
+                    are_buckets_active[i, self.transfer_warmup_epochs:] = 0
+        return are_buckets_active
 
     def predict(self, data, labels=None, dataset_codes=None,
                 beam_width=1, return_probs=False, return_basic_probs=False,
                 predict_with_basic=False):
         if self.morpho_dict is not None and not hasattr(self, "word_tag_mapper_"):
             self._make_word_tag_mapper(data)
-        X_test, indexes_by_buckets =\
+        X_test, indexes_by_buckets, datasets_by_buckets =\
             self.transform(data, labels=labels, bucket_size=BUCKET_SIZE)
         answer, probs = [None] * len(data), [None] * len(data)
         basic_probs = [None] * len(data)
@@ -666,7 +710,7 @@ class CharacterTagger:
     def score(self, data, labels, return_basic_probs=False):
         if self.morpho_dict is not None and not hasattr(self, "word_tag_mapper_"):
             self._make_word_tag_mapper(data)
-        X_test, indexes_by_buckets = self.transform(data, labels, bucket_size=BUCKET_SIZE)
+        X_test, indexes_by_buckets, _ = self.transform(data, labels, bucket_size=BUCKET_SIZE)
         probs, basic_probs = [None] * len(data), [None] * len(data)
         for k, (X_curr, bucket_indexes) in enumerate(zip(X_test[::-1], indexes_by_buckets[::-1])):
             X_curr = [np.array([X_test[i][j] for i in bucket_indexes])

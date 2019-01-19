@@ -195,7 +195,8 @@ def make_batch(data, fields_to_one_hot=None):
     return answer
 
 def generate_data(X, indexes_by_buckets, output_symbols_number,
-                  batch_size=None, use_last=True, has_answer=True,
+                  batch_size=None, epochs=None, active_buckets=None,
+                  use_last=True, has_answer=True,
                   shift_answer=False, shuffle=True, yield_weights=True,
                   duplicate_answer=False, fields_number=None,
                   fields_to_one_hot=None, weights=None):
@@ -216,17 +217,26 @@ def generate_data(X, indexes_by_buckets, output_symbols_number,
     total_arrays_size = sum(np.count_nonzero(X[j][answer_index] != PAD) - 1
                             for elem in indexes_by_buckets for j in elem)
     total_data_length = sum(len(elem) for elem in indexes_by_buckets)
+    curr_epoch = 0
+    if epochs is None:
+        epochs = np.inf
+    count = 0
     while True:
         if shuffle:
             for elem in indexes_by_buckets:
                 np.random.shuffle(elem)
             np.random.shuffle(batches_indexes)
+            # TO DO: make data generator to a class to avoid initialization on __next__ calls
+        curr_epoch += 1
         for i, start in batches_indexes:
+            if active_buckets is not None and not active_buckets[i, curr_epoch]:
+                continue
             bucket_size = len(indexes_by_buckets[i])
             end = min(bucket_size, start + batch_size) if batch_size is not None else bucket_size
             bucket_indexes = indexes_by_buckets[i][start:end]
             # TO DO: fix one-hot generation of data
             to_yield = make_batch([X[j][:fields_number] for j in bucket_indexes], fields_to_one_hot)
+            count += 1
             if has_answer:
                 indexes_to_yield = np.array([X[j][answer_index] for j in bucket_indexes])
                 if shift_answer:
