@@ -11,6 +11,7 @@ import tensorflow as tf
 import keras.backend.tensorflow_backend as kbt
 from keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
+from neural_LM.common_new import MultirunEarlyStopping
 from neural_LM.UD_preparation.extract_tags_from_UD import read_tags_infile, make_UD_pos_and_tag
 from neural_tagging.neural_tagging_1 import CharacterTagger, load_tagger
 from neural_LM import load_lm
@@ -178,7 +179,7 @@ if __name__ == '__main__':
     callbacks = []
     word_dictionary = None
     if "stop_callback" in params:
-        stop_callback = EarlyStopping(**params["stop_callback"])
+        stop_callback = MultirunEarlyStopping(**params["stop_callback"])
         callbacks.append(stop_callback)
     if "LR_callback" in params:
         lr_callback = ReduceLROnPlateau(**params["LR_callback"])

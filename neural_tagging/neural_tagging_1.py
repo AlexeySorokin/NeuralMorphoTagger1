@@ -19,6 +19,7 @@ from neural_LM.UD_preparation.extract_tags_from_UD import decode_word
 from neural_LM.vocabulary import Vocabulary, FeatureVocabulary, vocabulary_from_json
 from neural_LM.neural_lm import make_bucket_indexes
 from neural_LM.common import *
+from neural_LM.common_new import DataGenerator
 from neural_LM import load_lm
 from neural_LM.cells import SelfAttentionEncoder, SelfAttentionDecoder, LayerNorm1D, WeightedSum
 from neural_tagging.cells import Highway, WeightedCombinationLayer, TemporalDropout, leader_loss, positions_func
@@ -372,6 +373,8 @@ class CharacterTagger:
         lengths = [[len(data[i])+2 for i in elem] for elem in indexes_by_datasets]
         bucket_data = []
         for dataset_index, (curr_lengths, curr_indexes) in enumerate(zip(lengths, indexes_by_datasets)):
+            if len(curr_indexes) == 0:
+                continue
             if pad:
                 if len(curr_indexes) > 0:
                     curr_indexes_by_buckets, curr_level_lengths = make_bucket_indexes(
@@ -627,45 +630,66 @@ class CharacterTagger:
             else:
                 self.callbacks = [callback]
         are_train_buckets_active = self._make_active_buckets(train_dataset_codes_by_buckets)
+        active_train_epochs = are_train_buckets_active.max(axis=1).astype(bool)
         are_dev_buckets_active = self._make_active_buckets(dev_dataset_codes_by_buckets)
-        train_gen = generate_data(X, train_indexes_by_buckets, self.tags_number_,
-                                  self.batch_size, epochs=self.nepochs,
-                                  active_buckets=are_train_buckets_active,
-                                  use_last=False,
+        active_dev_epochs = are_dev_buckets_active.max(axis=1).astype(bool)
+
+        # train_gen = generate_data(X, train_indexes_by_buckets, self.tags_number_,
+        #                           self.batch_size, epochs=self.nepochs,
+        #                           active_buckets=are_train_buckets_active,
+        #                           use_last=False,
+        #                           duplicate_answer=self.use_lm,
+        #                           yield_weights=self.to_weigh_loss,
+        #                           fields_to_one_hot={0: self.symbols_number_},
+        #                           weights=weights)
+        train_gen = DataGenerator(X, train_indexes_by_buckets, self.tags_number_,
+                                  batch_size=self.batch_size, epochs=self.nepochs,
+                                  active_buckets=are_train_buckets_active[active_train_epochs],
                                   duplicate_answer=self.use_lm,
-                                  yield_weights=self.to_weigh_loss,
                                   fields_to_one_hot={0: self.symbols_number_},
-                                  weights=weights)
-        dev_gen = generate_data(X_dev, dev_indexes_by_buckets, self.tags_number_,
-                                epochs=self.nepochs, active_buckets=are_dev_buckets_active,
-                                use_last=False, shuffle=False,
-                                duplicate_answer=self.use_lm,
+                                  yield_weights=self.to_weigh_loss, weights=weights)
+        # dev_gen = generate_data(X_dev, dev_indexes_by_buckets, self.tags_number_,
+        #                         epochs=self.nepochs, active_buckets=are_dev_buckets_active,
+        #                         use_last=False, shuffle=False,
+        #                         duplicate_answer=self.use_lm,
+        #                         fields_to_one_hot={0: self.symbols_number_},
+        #                         yield_weights=self.to_weigh_loss)
+        dev_gen = DataGenerator(X_dev, dev_indexes_by_buckets, self.tags_number_,
+                                batch_size=self.batch_size, epochs=self.nepochs,
+                                active_buckets=are_dev_buckets_active[active_dev_epochs],
+                                shuffle=False, duplicate_answer=self.use_lm,
                                 fields_to_one_hot={0: self.symbols_number_},
                                 yield_weights=self.to_weigh_loss)
         for t in range(self.nepochs):
+            # TO_DO: create a separate generator on each epoch
             train_steps, dev_steps = 0, 0
-            for i in are_train_buckets_active[:,t].nonzero()[0]:
-                train_steps += (len(train_indexes_by_buckets[i]) + 1) // self.batch_size + 1
-            for i in are_dev_buckets_active[:,t].nonzero()[0]:
-                dev_steps += (len(dev_indexes_by_buckets[i]) + 1) // self.batch_size + 1
+            for i in are_train_buckets_active[t].nonzero()[0]:
+                train_steps += (len(train_indexes_by_buckets[i]) - 1) // self.batch_size + 1
+            for i in are_dev_buckets_active[t].nonzero()[0]:
+                dev_steps += (len(dev_indexes_by_buckets[i]) - 1) // self.batch_size + 1
             validation_data = dev_gen if dev_steps > 0 else None
             self.model_.fit_generator(
                 train_gen, steps_per_epoch=train_steps, epochs=t+1,
                 callbacks=self.callbacks, validation_data=validation_data,
                 validation_steps=dev_steps, initial_epoch=t,
-                verbose=1)
+                verbose=1, max_queue_size=0)
+            if self.model_.stop_training:
+                break
         if model_file is not None:
             self.model_.load_weights(model_file)
         return self
 
     def _make_active_buckets(self, bucket_dataset_codes):
-        are_buckets_active = np.ones(shape=(len(bucket_dataset_codes), self.nepochs), dtype=int)
+        are_buckets_active = np.ones(shape=(self.nepochs, len(bucket_dataset_codes)), dtype=int)
         if self.transfer_warmup_epochs > 0:
             for i, code in enumerate(bucket_dataset_codes):
                 if code == 0:
-                    are_buckets_active[i, :self.transfer_warmup_epochs] = 0
+                    are_buckets_active[:self.transfer_warmup_epochs, i] = 0
                 else:
-                    are_buckets_active[i, self.transfer_warmup_epochs:] = 0
+                    are_buckets_active[self.transfer_warmup_epochs:, i] = 0
+        # only those epochs which have at least one bucket are counted
+        # has_active_buckets_in_epoch = np.max(are_buckets_active, axis=1).astype(bool)
+        # are_buckets_active = are_buckets_active[has_active_buckets_in_epoch]
         return are_buckets_active
 
     def predict(self, data, labels=None, dataset_codes=None,
