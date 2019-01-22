@@ -117,6 +117,7 @@ class CharacterTagger:
                  word_tag_vectorizers=None,
                  additional_inputs_number=0, additional_inputs_weight=0,
                  use_additional_symbol_features=False, transfer_warmup_epochs=0,
+                 freeze_after_transfer=False,
                  normalize_lm_embeddings=False, base_model_weight=0.25,
                  word_rnn = "cnn", min_char_count=1, char_embeddings_size=16,
                  char_conv_layers = 1, char_window_size = 5, char_filters = None,
@@ -146,6 +147,7 @@ class CharacterTagger:
         self.additional_inputs_weight = additional_inputs_weight
         self.use_additional_symbol_features = use_additional_symbol_features
         self.transfer_warmup_epochs = transfer_warmup_epochs
+        self.freeze_after_transfer = freeze_after_transfer
         self.normalize_lm_embeddings = normalize_lm_embeddings
         self.base_model_weight = base_model_weight
         self.word_rnn = word_rnn
@@ -268,7 +270,8 @@ class CharacterTagger:
                     isinstance(getattr(CharacterTagger, attr, None), property) or
                     isinstance(val, np.ndarray) or isinstance(val, Vocabulary) or
                     attr.isupper() or isinstance(val, kb.Function) or
-                    attr in ["callbacks", "model_", "_basic_model_", "warmup_model_",
+                    attr in ["callbacks", "_compile_args",
+                             "model_", "_basic_model_", "warmup_model_",
                              "_decoder_", "lm_",
                              "morpho_dict_indexes_func_", "word_tag_mapper_", "morpho_dict_",
                              "regularizer", "fusion_regularizer",
@@ -634,6 +637,8 @@ class CharacterTagger:
         are_dev_buckets_active = self._make_active_buckets(dev_dataset_codes_by_buckets)
         active_dev_epochs = are_dev_buckets_active.max(axis=1).astype(bool)
         for t in range(self.nepochs):
+            if t == self.transfer_warmup_epochs and self.freeze_after_transfer:
+                self._freeze_output_network()
             train_steps, dev_steps = 0, 0
             curr_train_indexes, curr_dev_indexes = [], []
             for i in are_train_buckets_active[t].nonzero()[0]:
@@ -922,6 +927,7 @@ class CharacterTagger:
             compile_args["loss_weights"] = loss_weights
         else:
             outputs = pre_outputs
+        self._compile_args = compile_args
         self.model_ = Model(inputs, outputs)
         self.model_.compile(**compile_args)
         self._embedder_ = kb.Function(basic_inputs + [kb.learning_phase()], [word_outputs, states])
@@ -1005,6 +1011,7 @@ class CharacterTagger:
         for layer in self.model_.layers:
             if layer.name.startswith("word_lstm") or layer.name == "p":
                 layer.trainable = False
+        self.model_.compile(**self._compile_args)
         return
 
     def tag_embeddings_output_layer(self, lstm_outputs):
