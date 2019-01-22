@@ -19,7 +19,7 @@ from neural_LM.UD_preparation.extract_tags_from_UD import decode_word
 from neural_LM.vocabulary import Vocabulary, FeatureVocabulary, vocabulary_from_json
 from neural_LM.neural_lm import make_bucket_indexes
 from neural_LM.common import *
-from neural_LM.common_new import DataGenerator
+from neural_LM.common_new import DataGenerator, MultirunEarlyStopping
 from neural_LM import load_lm
 from neural_LM.cells import SelfAttentionEncoder, SelfAttentionDecoder, LayerNorm1D, WeightedSum
 from neural_tagging.cells import Highway, WeightedCombinationLayer, TemporalDropout, leader_loss, positions_func
@@ -633,48 +633,37 @@ class CharacterTagger:
         active_train_epochs = are_train_buckets_active.max(axis=1).astype(bool)
         are_dev_buckets_active = self._make_active_buckets(dev_dataset_codes_by_buckets)
         active_dev_epochs = are_dev_buckets_active.max(axis=1).astype(bool)
-
-        # train_gen = generate_data(X, train_indexes_by_buckets, self.tags_number_,
-        #                           self.batch_size, epochs=self.nepochs,
-        #                           active_buckets=are_train_buckets_active,
-        #                           use_last=False,
-        #                           duplicate_answer=self.use_lm,
-        #                           yield_weights=self.to_weigh_loss,
-        #                           fields_to_one_hot={0: self.symbols_number_},
-        #                           weights=weights)
-        train_gen = DataGenerator(X, train_indexes_by_buckets, self.tags_number_,
-                                  batch_size=self.batch_size, epochs=self.nepochs,
-                                  active_buckets=are_train_buckets_active[active_train_epochs],
-                                  duplicate_answer=self.use_lm,
-                                  fields_to_one_hot={0: self.symbols_number_},
-                                  yield_weights=self.to_weigh_loss, weights=weights)
-        # dev_gen = generate_data(X_dev, dev_indexes_by_buckets, self.tags_number_,
-        #                         epochs=self.nepochs, active_buckets=are_dev_buckets_active,
-        #                         use_last=False, shuffle=False,
-        #                         duplicate_answer=self.use_lm,
-        #                         fields_to_one_hot={0: self.symbols_number_},
-        #                         yield_weights=self.to_weigh_loss)
-        dev_gen = DataGenerator(X_dev, dev_indexes_by_buckets, self.tags_number_,
-                                batch_size=self.batch_size, epochs=self.nepochs,
-                                active_buckets=are_dev_buckets_active[active_dev_epochs],
-                                shuffle=False, duplicate_answer=self.use_lm,
-                                fields_to_one_hot={0: self.symbols_number_},
-                                yield_weights=self.to_weigh_loss)
         for t in range(self.nepochs):
-            # TO_DO: create a separate generator on each epoch
             train_steps, dev_steps = 0, 0
+            curr_train_indexes, curr_dev_indexes = [], []
             for i in are_train_buckets_active[t].nonzero()[0]:
+                curr_train_indexes.append(train_indexes_by_buckets[i])
                 train_steps += (len(train_indexes_by_buckets[i]) - 1) // self.batch_size + 1
             for i in are_dev_buckets_active[t].nonzero()[0]:
+                curr_dev_indexes.append(dev_indexes_by_buckets[i])
                 dev_steps += (len(dev_indexes_by_buckets[i]) - 1) // self.batch_size + 1
-            validation_data = dev_gen if dev_steps > 0 else None
+            train_gen = DataGenerator(X, curr_train_indexes, self.tags_number_,
+                                      batch_size=self.batch_size, duplicate_answer=self.use_lm,
+                                      fields_to_one_hot={0: self.symbols_number_},
+                                      yield_weights=self.to_weigh_loss, weights=weights)
+            if dev_steps > 0:
+                dev_gen = DataGenerator(X_dev, curr_dev_indexes, self.tags_number_,
+                                        batch_size=self.batch_size, shuffle=False,
+                                        duplicate_answer=self.use_lm,
+                                        fields_to_one_hot={0: self.symbols_number_},
+                                        yield_weights=self.to_weigh_loss)
+            else:
+                dev_gen = None
+            # TO_DO: set callback values
+            # for callback in self.callbacks:
+            #     if isinstance(callback, MultirunEarlyStopping):
             self.model_.fit_generator(
                 train_gen, steps_per_epoch=train_steps, epochs=t+1,
-                callbacks=self.callbacks, validation_data=validation_data,
-                validation_steps=dev_steps, initial_epoch=t,
-                verbose=1, max_queue_size=0)
+                callbacks=self.callbacks, validation_data=dev_gen,
+                validation_steps=dev_steps, initial_epoch=t, verbose=1)
             if self.model_.stop_training:
                 break
+
         if model_file is not None:
             self.model_.load_weights(model_file)
         return self
@@ -976,7 +965,10 @@ class CharacterTagger:
             highway_input = Highway(activation="relu")(highway_input)
             if self.highway_dropout > 0.0:
                 highway_input = kl.Dropout(self.highway_dropout)(highway_input)
-        highway_output = Highway(activation="relu")(highway_input)
+        if self.char_highway_layers > 0:
+            highway_output = Highway(activation="relu")(highway_input)
+        else:
+            highway_output = highway_input
         return highway_output
 
     def _build_basic_network(self, word_outputs, additional_embeddings=None):
