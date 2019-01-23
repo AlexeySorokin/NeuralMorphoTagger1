@@ -5,6 +5,7 @@ import json
 import os
 import copy
 from typing import List
+from pathlib import Path
 # import statprof
 
 import keras.layers as kl
@@ -77,8 +78,10 @@ def load_tagger(infile):
     if tagger.morpho_dict is not None:
         tagger._make_morpho_dict_indexes_func(tagger.morpho_dict_params["type"])
     # модель
-    tagger.build()  # не работает сохранение модели, приходится сохранять только веса
-    tagger.model_.load_weights(os.path.abspath(json_data['dump_file']))
+    tagger.build()
+    # model_file is relative to json file directory
+    model_file = os.path.join(os.path.dirname(infile), json_data['dump_file'])
+    tagger.model_.load_weights(model_file)
     return tagger
 
 
@@ -261,10 +264,10 @@ class CharacterTagger:
         return
 
     def to_json(self, outfile, model_file, lm_file=None, dictionary_file=None):
+        model_file = os.path.relpath(model_file, os.path.dirname(outfile))
         info = dict()
         if lm_file is not None:
             info["lm_file"] = lm_file
-        # model_file = os.path.abspath(model_file)
         for (attr, val) in inspect.getmembers(self):
             if not (attr.startswith("__") or inspect.ismethod(val) or
                     isinstance(getattr(CharacterTagger, attr, None), property) or
@@ -573,7 +576,10 @@ class CharacterTagger:
         else:
             X_dev, dev_indexes_by_buckets = [None] * 2
         self.build()
+        # saving the model
         if save_file is not None and model_file is not None:
+            # if model_file is not None:
+            #     model_file = os.path.relpath(model_file, os.path.dirname(save_file))
             self.to_json(save_file, model_file, lm_file)
         self._train_on_data(X_train, indexes_by_buckets, X_dev,
                             dev_indexes_by_buckets, dataset_codes=dataset_codes,
@@ -633,9 +639,7 @@ class CharacterTagger:
             else:
                 self.callbacks = [callback]
         are_train_buckets_active = self._make_active_buckets(train_dataset_codes_by_buckets)
-        active_train_epochs = are_train_buckets_active.max(axis=1).astype(bool)
-        are_dev_buckets_active = self._make_active_buckets(dev_dataset_codes_by_buckets)
-        active_dev_epochs = are_dev_buckets_active.max(axis=1).astype(bool)
+        are_dev_buckets_active = self._make_active_buckets(dev_dataset_codes_by_buckets, dev=True)
         for t in range(self.nepochs):
             if t == self.transfer_warmup_epochs and self.freeze_after_transfer:
                 self._freeze_output_network()
@@ -673,12 +677,13 @@ class CharacterTagger:
             self.model_.load_weights(model_file)
         return self
 
-    def _make_active_buckets(self, bucket_dataset_codes):
+    def _make_active_buckets(self, bucket_dataset_codes, dev=False):
         are_buckets_active = np.ones(shape=(self.nepochs, len(bucket_dataset_codes)), dtype=int)
         if self.transfer_warmup_epochs > 0:
             for i, code in enumerate(bucket_dataset_codes):
                 if code == 0:
-                    are_buckets_active[:self.transfer_warmup_epochs, i] = 0
+                    if not dev:
+                        are_buckets_active[:self.transfer_warmup_epochs, i] = 0
                 else:
                     are_buckets_active[self.transfer_warmup_epochs:, i] = 0
         # only those epochs which have at least one bucket are counted
@@ -692,7 +697,7 @@ class CharacterTagger:
         if self.morpho_dict is not None and not hasattr(self, "word_tag_mapper_"):
             self._make_word_tag_mapper(data)
         X_test, indexes_by_buckets, datasets_by_buckets =\
-            self.transform(data, labels=labels, bucket_size=BUCKET_SIZE)
+            self.transform(data, labels=labels, bucket_size=BUCKET_SIZE, join_buckets=False)
         answer, probs = [None] * len(data), [None] * len(data)
         basic_probs = [None] * len(data)
         fields_number = len(X_test[0])-int(labels is not None)

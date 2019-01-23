@@ -4,6 +4,7 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 import json
 import copy
 import random
+import inspect
 from collections import defaultdict
 
 import numpy as np
@@ -15,17 +16,17 @@ from neural_LM.common_new import MultirunEarlyStopping
 from neural_LM.UD_preparation.extract_tags_from_UD import read_tags_infile, make_UD_pos_and_tag
 from neural_tagging.neural_tagging_1 import CharacterTagger, load_tagger
 from neural_LM import load_lm
-from neural_tagging.misc import TagNormalizer
+from neural_tagging.misc import TagNormalizer, load_tag_normalizer
 
 DEFAULT_NONE_PARAMS = ["model_file", "test_files", "outfiles", "train_files",
                        "dev_files", "dump_file", "save_file", "load_file", "lm_file",
                        "prediction_files", "comparison_files",
                        "gh_outfiles", "gh_comparison_files"]
 DEFAULT_PARAMS = {}
-DEFAULT_LIST_PARAMS = ["vectorizers"]
+DEFAULT_LIST_PARAMS = ["vectorizers", "additional_train_files",
+                       "additional_dev_files", "additional_test_files"]
 DEFAULT_DICT_PARAMS = ["model_params", "read_params", "predict_params", "vocabulary_files",
-                       "train_read_params", "dev_read_params", "test_read_params",
-                       "additional_train_files"]
+                       "train_read_params", "dev_read_params", "test_read_params"]
 
 
 def read_config(infile):
@@ -209,7 +210,7 @@ if __name__ == '__main__':
             normal_tags = train_labels + (dev_labels if dev_labels is not None else [])
             normalizer = TagNormalizer().train(normal_tags)
             additional_train_datasets = defaultdict(list)
-            additional_read_params = params["additional_read_params"]
+            additional_read_params = params.get("additional_read_params", train_read_params)
             if isinstance(additional_read_params, dict):
                 additional_read_params = [additional_read_params] * len(params["additional_train_files"])
             for i, (train_file, code) in enumerate(params["additional_train_files"]):
@@ -222,8 +223,17 @@ if __name__ == '__main__':
                 additional_train_data.append(curr_data)
                 curr_labels = [[normalizer.transform(x, mode="UD") for x in elem] for elem in curr_labels]
                 additional_train_labels.append(curr_labels)
+            if "tag_normalizer_save_file" in params:
+                save_file = params["tag_normalizer_save_file"]
+                normalizer.to_json(save_file)
+                other_normalizer = load_tag_normalizer(save_file)
+                for (attr, val) in inspect.getmembers(normalizer):
+                    if not (attr.startswith("__") or inspect.ismethod(val)):
+                        other_val = getattr(other_normalizer, attr)
+                        print(attr, val == other_val)
         else:
             additional_train_data, additional_train_labels = None, None
+        sys.exit()
         cls.train(train_data, train_labels, dev_data, dev_labels,
                   additional_train_data, additional_train_labels,
                   model_file=params["model_file"], save_file=params["save_file"],

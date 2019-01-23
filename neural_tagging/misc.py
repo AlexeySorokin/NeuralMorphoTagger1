@@ -1,8 +1,28 @@
 from collections import defaultdict
 from itertools import chain
 from heapdict import heapdict
+import inspect
+import ujson as json
 
 from neural_LM.UD_preparation.extract_tags_from_UD import *
+
+def load_tag_normalizer(infile):
+    with open(infile, "r", encoding="utf8") as fin:
+        data = json.load(fin)
+    tag_normalizer = TagNormalizer(data["max_error"])
+    for key, value in data.items():
+        if key == "_trie":
+            value = [defaultdict(dict, elem) for elem in value]
+        elif key == "feats":
+            value = defaultdict(lambda: defaultdict(int), value)
+        elif key == "feats_by_pos":
+            value = defaultdict(set, value)
+        elif key == "labels":
+            value = {(elem[0], tuple(tuple(x) for x in elem[1])) for elem in value}
+        elif key == "max_error":
+            continue
+        setattr(tag_normalizer, key, value)
+    return tag_normalizer
 
 class TagNormalizer:
 
@@ -12,6 +32,15 @@ class TagNormalizer:
     @property
     def nodes_number(self):
         return len(self._trie)
+
+    def to_json(self, outfile):
+        data = dict()
+        for (attr, val) in inspect.getmembers(self):
+            if not (attr.startswith("__") or inspect.ismethod(val)
+                    or isinstance(getattr(TagNormalizer, attr, None), property)):
+                data[attr] = val
+        with open(outfile, "w", encoding="utf8") as fout:
+            json.dump(data, fout)
 
     def train(self, labels):
         if isinstance(labels[0], list):
