@@ -110,17 +110,35 @@ def extract_feature_indexes(tag, tag_dictionary):
     return CASHED_INDEXES[tag]
 
 
+def training_parameter(name):
+    def _getter(instance):
+        return instance.train_params_[name]
+
+    def _setter(instance, value):
+        instance.train_params_[name] = value
+
+    return property(_getter, _setter)
+
+
 class CharacterTagger:
     """
     A class for character-based neural morphological tagger
     """
+
+    nepochs = training_parameter("nepochs")
+    batch_size = training_parameter("batch_size")
+    validation_split = training_parameter("validation_split")
+    transfer_warmup_epochs = training_parameter("transfer_warmup_epochs")
+    freeze_after_transfer = training_parameter("freeze_after_transfer")
+    batch_params = training_parameter("batch_params")
+    batching_probs_ = training_parameter('batching_probs_')
+
     def __init__(self, reverse=False, use_lm_loss=False, use_lm=False,
                  morpho_dict=None, morpho_dict_params=None,
                  morpho_dict_embeddings_size=256, word_vectorizers=None,
                  word_tag_vectorizers=None,
                  additional_inputs_number=0, additional_inputs_weight=0,
-                 use_additional_symbol_features=False, transfer_warmup_epochs=0,
-                 freeze_after_transfer=False,
+                 use_additional_symbol_features=False,
                  normalize_lm_embeddings=False, base_model_weight=0.25,
                  word_rnn = "cnn", min_char_count=1, char_embeddings_size=16,
                  char_conv_layers = 1, char_window_size = 5, char_filters = None,
@@ -135,7 +153,6 @@ class CharacterTagger:
                  use_leader_loss=False, leader_loss_weight=0.2,
                  regularizer=None, fusion_regularizer=None,
                  probs_threshold=None, lm_probs_threshold=None,
-                 batch_size=16, validation_split=0.2, nepochs=25,
                  min_prob=0.01, max_diff=2.0, to_weigh_loss=True,
                  callbacks=None, verbose=1, random_state=189):
         self.reverse = reverse
@@ -149,8 +166,6 @@ class CharacterTagger:
         self.additional_inputs_number = additional_inputs_number
         self.additional_inputs_weight = additional_inputs_weight
         self.use_additional_symbol_features = use_additional_symbol_features
-        self.transfer_warmup_epochs = transfer_warmup_epochs
-        self.freeze_after_transfer = freeze_after_transfer
         self.normalize_lm_embeddings = normalize_lm_embeddings
         self.base_model_weight = base_model_weight
         self.word_rnn = word_rnn
@@ -184,9 +199,6 @@ class CharacterTagger:
         self.fusion_regularizer = fusion_regularizer
         self.probs_threshold = probs_threshold
         self.lm_probs_threshold = lm_probs_threshold
-        self.batch_size = batch_size
-        self.validation_split = validation_split
-        self.nepochs=nepochs
         self.min_prob = min_prob
         self.max_diff = max_diff
         self.to_weigh_loss = to_weigh_loss
@@ -234,6 +246,42 @@ class CharacterTagger:
             self.fusion_regularizer = kreg.l2(self.fusion_regularizer)
         np.random.seed(self.random_state)
 
+    def _make_batch_params_dict(self, params, code):
+        default_values_batch = {"first_epoch": 1, "last_epoch": self.nepochs, "decay_epoch": self.nepochs+1,
+                                "initial_prob": 1.0, "decay": 0.0, "growth": 0.0}
+        if self.transfer_warmup_epochs > 0:
+            answer = copy.copy(default_values_batch)
+            if code == 0:
+                answer["first_epoch"] = self.transfer_warmup_epochs + 1
+            else:
+                answer["last_epoch"] = self.transfer_warmup_epochs
+            return answer
+        if code in params:
+            curr_params = params[code]
+        elif str(code) in params:
+            curr_params = params[str(code)]
+        else:
+            curr_params = dict()
+        if "decay" in curr_params and "growth" in curr_params:
+            raise ValueError("You cannot specify both 'decay' and 'growth' in batching params.")
+        curr_params = {key: curr_params.get(key, value) for key, value in default_values_batch.items()}
+        return curr_params
+
+    def _set_train_params(self, batch_size=16, validation_split=0.2, nepochs=25,
+                          transfer_warmup_epochs=0, freeze_after_transfer=0, batch_params=None):
+        self.train_params_ = dict()
+        self.batch_size = batch_size
+        self.validation_split = validation_split
+        self.nepochs = nepochs
+        self.transfer_warmup_epochs = transfer_warmup_epochs
+        self.freeze_after_transfer = freeze_after_transfer
+        if batch_params is None:
+            batch_params = dict()
+        self.batch_params = [self._make_batch_params_dict(batch_params, code)
+                             for code in range(self.additional_inputs_number+1)]
+        self._make_batching_probs()
+        return
+
     def _make_char_filters(self):
         """
         Initializes window filters in case they are not given explicitly
@@ -273,7 +321,7 @@ class CharacterTagger:
                     isinstance(getattr(CharacterTagger, attr, None), property) or
                     isinstance(val, np.ndarray) or isinstance(val, Vocabulary) or
                     attr.isupper() or isinstance(val, kb.Function) or
-                    attr in ["callbacks", "_compile_args",
+                    attr in ["callbacks", "_compile_args", "batching_probs_", "train_params_",
                              "model_", "_basic_model_", "warmup_model_",
                              "_decoder_", "lm_",
                              "morpho_dict_indexes_func_", "word_tag_mapper_", "morpho_dict_",
@@ -324,6 +372,13 @@ class CharacterTagger:
     @property
     def has_additional_inputs(self):
         return int(self.additional_inputs_number > 0)
+
+    ### Properties for training parameters ###
+
+
+
+
+    ###
 
     def _make_word_dictionary(self, data=None):
         self._make_word_tag_mapper(data)
@@ -514,6 +569,7 @@ class CharacterTagger:
 
     def train(self, data, labels, dev_data=None, dev_labels=None,
               additional_data=None, additional_labels=None,
+              train_params=None, to_build=True,
               symbol_vocabulary_file=None, tags_vocabulary_file=None,
               lm_file=None, model_file=None, save_file=None):
         """
@@ -525,6 +581,9 @@ class CharacterTagger:
         :return:
         """
         # vocabularies for symbols and tags
+        if train_params is None:
+            train_params = dict()
+        self._set_train_params(**train_params)
         data_for_vocab, labels_for_vocab = data[:], labels[:]
         if additional_data is not None:
             for (elem, elem_labels) in zip(additional_data, additional_labels):
@@ -561,18 +620,16 @@ class CharacterTagger:
             data, dev_data = [data[i] for i in train_indexes], [data[i] for i in dev_indexes]
             labels, dev_labels = [labels[i] for i in train_indexes], [labels[i] for i in dev_indexes]
         dataset_codes = [0] * len(data)
-        if self.additional_inputs_number > 0:
+        if self.additional_inputs_number > 0 and additional_data is not None:
             for code, (add_dataset, add_labels) in enumerate(zip(additional_data, additional_labels), 1):
                 data += add_dataset
                 dataset_codes += [code] * len(add_dataset)
                 labels += add_labels
         X_train, indexes_by_buckets, dataset_codes_by_buckets = self.transform(
-            data, labels, buckets_number=10, dataset_codes=dataset_codes,
-            join_datasets=(self.transfer_warmup_epochs==0))
+            data, labels, buckets_number=10, dataset_codes=dataset_codes, join_datasets=False)
         if dev_data is not None:
             X_dev, dev_indexes_by_buckets, _ =\
-                self.transform(dev_data, dev_labels, bucket_size=BUCKET_SIZE,
-                               join_datasets=(self.transfer_warmup_epochs==0))
+                self.transform(dev_data, dev_labels, bucket_size=BUCKET_SIZE, join_datasets=False)
         else:
             X_dev, dev_indexes_by_buckets = [None] * 2
         self.build()
@@ -638,17 +695,27 @@ class CharacterTagger:
                 self.callbacks.append(callback)
             else:
                 self.callbacks = [callback]
-        are_train_buckets_active = self._make_active_buckets(train_dataset_codes_by_buckets)
-        are_dev_buckets_active = self._make_active_buckets(dev_dataset_codes_by_buckets, dev=True)
+        # are_train_buckets_active = self._make_active_buckets(train_dataset_codes_by_buckets)
+        # are_dev_buckets_active = self._make_active_buckets(dev_dataset_codes_by_buckets)
         for t in range(self.nepochs):
             if t == self.transfer_warmup_epochs and self.freeze_after_transfer:
                 self._freeze_output_network()
             train_steps, dev_steps = 0, 0
             curr_train_indexes, curr_dev_indexes = [], []
-            for i in are_train_buckets_active[t].nonzero()[0]:
-                curr_train_indexes.append(train_indexes_by_buckets[i])
-                train_steps += (len(train_indexes_by_buckets[i]) - 1) // self.batch_size + 1
-            for i in are_dev_buckets_active[t].nonzero()[0]:
+            for i, code in enumerate(train_dataset_codes_by_buckets):
+                bucket_prob = self.batching_probs_[code, t]
+                if bucket_prob == 0.0:
+                    continue
+                sampling_prob = np.random.binomial(1, bucket_prob, len(train_indexes_by_buckets[i]))
+                curr_bucket_indexes = [train_indexes_by_buckets[i][j] for j in sampling_prob.nonzero()[0]]
+                curr_train_indexes.append(curr_bucket_indexes)
+                train_steps += (len(curr_bucket_indexes) - 1) // self.batch_size + 1
+            for i, code in enumerate(dev_dataset_codes_by_buckets):
+                if self.transfer_warmup_epochs > 0:
+                    if int(t >= self.transfer_warmup_epochs) != int(code == 0):
+                        continue
+                elif self.batching_probs_[code, t] == 0.0:
+                    continue
                 curr_dev_indexes.append(dev_indexes_by_buckets[i])
                 dev_steps += (len(dev_indexes_by_buckets[i]) - 1) // self.batch_size + 1
             train_gen = DataGenerator(X, curr_train_indexes, self.tags_number_,
@@ -663,6 +730,9 @@ class CharacterTagger:
                                         yield_weights=self.to_weigh_loss)
             else:
                 dev_gen = None
+            for callback in self.callbacks:
+                if isinstance(callback, ModelCheckpoint):
+                    callback.save_best_only = (dev_steps > 0)
             # TO_DO: set callback values
             # for callback in self.callbacks:
             #     if isinstance(callback, MultirunEarlyStopping):
@@ -676,6 +746,18 @@ class CharacterTagger:
         if model_file is not None:
             self.model_.load_weights(model_file)
         return self
+
+    def _make_batching_probs(self):
+        batching_probs = np.zeros(shape=(self.additional_inputs_number+1, self.nepochs), dtype=float)
+        for code, batching_params in enumerate(self.batch_params):
+            start, end = batching_params["first_epoch"]-1, batching_params["last_epoch"]
+            decay = batching_params["decay_epoch"]-1
+            batching_probs[code, start: end] = batching_params["initial_prob"]
+            growth = -batching_params["decay"] if batching_params["decay"] > 0 else batching_params["growth"]
+            for epoch in range(decay, end):
+                batching_probs[code, epoch] += growth * (epoch - decay + 1)
+        self.batching_probs_ = np.minimum(np.maximum(batching_probs, 0.0), 1.0)
+        return
 
     def _make_active_buckets(self, bucket_dataset_codes, dev=False):
         are_buckets_active = np.ones(shape=(self.nepochs, len(bucket_dataset_codes)), dtype=int)
@@ -694,10 +776,15 @@ class CharacterTagger:
     def predict(self, data, labels=None, dataset_codes=None,
                 beam_width=1, return_probs=False, return_basic_probs=False,
                 predict_with_basic=False):
+        if dataset_codes is None:
+            dataset_codes = [0] * len(data)
+        elif isinstance(dataset_codes, int):
+            dataset_codes = [dataset_codes] * len(data)
         if self.morpho_dict is not None and not hasattr(self, "word_tag_mapper_"):
             self._make_word_tag_mapper(data)
         X_test, indexes_by_buckets, datasets_by_buckets =\
-            self.transform(data, labels=labels, bucket_size=BUCKET_SIZE, join_buckets=False)
+            self.transform(data, labels=labels, dataset_codes=dataset_codes,
+                           bucket_size=BUCKET_SIZE, join_buckets=False)
         answer, probs = [None] * len(data), [None] * len(data)
         basic_probs = [None] * len(data)
         fields_number = len(X_test[0])-int(labels is not None)
@@ -1029,7 +1116,6 @@ class CharacterTagger:
         scores = kl.TimeDistributed(score_layer)(outputs_embeddings)
         probs = kl.TimeDistributed(kl.Activation("softmax"), name="p")(scores)
         return probs
-
 
 def extend_history(histories, hyps, indexes, start=0, pos=None,
                    history_pos=0, value=None, func="append", **kwargs):
