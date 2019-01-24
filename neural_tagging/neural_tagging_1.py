@@ -18,7 +18,7 @@ from keras.activations import softmax
 from neural_LM.UD_preparation.read_tags import is_subsumed, descr_to_feats
 from neural_LM.UD_preparation.extract_tags_from_UD import decode_word
 from neural_LM.vocabulary import Vocabulary, FeatureVocabulary, vocabulary_from_json
-from neural_LM.neural_lm import make_bucket_indexes
+from neural_LM.neural_LM import make_bucket_indexes
 from neural_LM.common import *
 from neural_LM.common_new import DataGenerator, MultirunEarlyStopping
 from neural_LM import load_lm
