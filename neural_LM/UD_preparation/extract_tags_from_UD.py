@@ -2,7 +2,7 @@ import sys
 from collections import defaultdict
 import random
 
-WORD_COLUMN, POS_COLUMN, TAG_COLUMN = 1, 3, 5
+WORD_COLUMN, POS_COLUMN, TAG_COLUMN, LEMMA_COLUMN = 1, 3, 5, 2
 
 POS_MAPPING = {".": "<SENT>", "?": "<QUESTION>", "!":"<EXCLAM>",
                ",": "<COMMA>", "-": "<HYPHEN>", "--": "<DASH>",
@@ -113,10 +113,12 @@ def extract_frequent_words(infiles, to_lower=False, append_case="first", thresho
 def read_tags_infile(infile, read_words=False, to_lower=False,
                      append_case="first", wrap=False, attach_tokens=False,
                      word_column=WORD_COLUMN, pos_column=POS_COLUMN,
-                     tag_column=TAG_COLUMN, read_only_words=False,
-                     return_source_words=False, max_sents=-1, to_shuffle=False):
+                     tag_column=TAG_COLUMN, lemma_column=LEMMA_COLUMN,
+                     read_only_words=False, return_source_words=False, return_lemmas=False,
+                     max_sents=-1, to_shuffle=False):
     answer, curr_tag_sent, curr_word_sent = [], [], []
     source_answer, curr_source_sent = [], []
+    lemma_sents, curr_lemma_sent = [], []
     with open(infile, "r", encoding="utf8") as fin:
         print(infile)
         for line in fin:
@@ -129,7 +131,9 @@ def read_tags_infile(infile, read_words=False, to_lower=False,
                                  else (curr_word_sent, curr_tag_sent))
                     answer.append(to_append)
                     source_answer.append(curr_source_sent)
-                curr_tag_sent, curr_word_sent, curr_source_sent = [], [], []
+                    lemma_sents.append(curr_lemma_sent)
+                curr_tag_sent, curr_word_sent = [], []
+                curr_source_sent, curr_lemma_sent = [], []
                 if len(answer) == max_sents and not to_shuffle:
                     break
                 continue
@@ -137,10 +141,11 @@ def read_tags_infile(infile, read_words=False, to_lower=False,
             index = splitted[0]
             if not index.isdigit():
                 continue
-            word = splitted[word_column]
+            word, lemma = splitted[word_column], splitted[lemma_column]
             curr_source_sent.append(word)
             word = process_word(word, to_lower=to_lower, append_case=append_case)
             curr_word_sent.append(word)
+            curr_lemma_sent.append(lemma)
             if not read_only_words:
                 pos, tag = splitted[pos_column], splitted[tag_column]
                 if pos == "PUNCT" and word in POS_MAPPING:
@@ -154,6 +159,7 @@ def read_tags_infile(infile, read_words=False, to_lower=False,
                          else (curr_word_sent, curr_tag_sent))
             answer.append(to_append)
             source_answer.append(curr_source_sent)
+            lemma_sents.append(curr_lemma_sent)
     if not read_only_words and attach_tokens:
         for i, (word_sent, tag_sent) in enumerate(answer):
             for j, (word, tag) in enumerate(zip(word_sent, tag_sent)):
@@ -173,7 +179,12 @@ def read_tags_infile(infile, read_words=False, to_lower=False,
         answer = [elem[1] for elem in answer]
     if wrap:
         return [[elem] for elem in answer]
-    return (answer, source_answer) if return_source_words else answer
+    answer = [answer]
+    if return_source_words:
+        answer.append(source_answer)
+    if return_lemmas:
+        answer.append(lemma_sents)
+    return tuple(answer) if len(answer) > 1 else answer[0]
 
 if __name__ == "__main__":
     L = len(sys.argv[1:])

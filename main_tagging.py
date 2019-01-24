@@ -26,8 +26,11 @@ DEFAULT_PARAMS = {}
 DEFAULT_LIST_PARAMS = ["vectorizers", "additional_train_files",
                        "additional_dev_files", "additional_test_files"]
 DEFAULT_DICT_PARAMS = ["model_params", "read_params", "predict_params", "vocabulary_files",
-                       "train_read_params", "dev_read_params", "test_read_params"]
+                       "train_read_params", "dev_read_params", "test_read_params",
+                       "train_params"]
 
+TRAIN_KEYS = ["batch_size", "validation_split", "nepochs",
+              "transfer_warmup_epochs", "freeze_after_transfer", "batch_params"]
 
 def read_config(infile):
     with open(infile, "r", encoding="utf8") as fin:
@@ -44,6 +47,9 @@ def read_config(infile):
     for param, value in from_json.items():
         if param not in params:
             params[param] = value
+    for key in TRAIN_KEYS:
+        if key in params["model_params"]:
+            params["train_params"][key] = params["model_params"].pop(key)
     return params
 
 
@@ -75,6 +81,7 @@ def output_predictions(outfile, data, labels):
                 label, tag = make_UD_pos_and_tag(label)
                 fout.write("{}\t{}\t{}\t{}\n".format(j, word, label, tag))
             fout.write("\n")
+
 
 def output_results(outfile, data, pred_labels, corr_labels,
                    probs, corr_probs, basic_probs=None,
@@ -178,7 +185,7 @@ if __name__ == '__main__':
         sys.exit("Usage: main.py <config json file>")
     params = read_config(sys.argv[1])
     callbacks = []
-    word_dictionary = None
+    word_dictionary, normalizer = None, None
     if "stop_callback" in params:
         stop_callback = MultirunEarlyStopping(**params["stop_callback"])
         callbacks.append(stop_callback)
@@ -189,8 +196,13 @@ if __name__ == '__main__':
         callbacks = None
     params["model_params"]["callbacks"] = callbacks
     params["predict_params"]["return_probs"] = True
+    if "tag_normalizer_load_file" in params:
+        normalizer = load_tag_normalizer(params["tag_normalizer_load_file"])
     if params.get("to_train", True) and params["train_files"] is not None:
-        cls = CharacterTagger(**params["model_params"])
+        if params.get("to_load", False) and params["load_file"] is not None:
+            cls = load_tagger(params["load_file"])
+        else:
+            cls = CharacterTagger(**params["model_params"])
         train_read_params = copy.deepcopy(params["read_params"])
         train_read_params.update(params["train_read_params"])
         train_data = []
@@ -207,8 +219,9 @@ if __name__ == '__main__':
         else:
             dev_data, dev_labels = None, None
         if len(params["additional_train_files"]) > 0:
-            normal_tags = train_labels + (dev_labels if dev_labels is not None else [])
-            normalizer = TagNormalizer().train(normal_tags)
+            if normalizer is None:
+                normal_tags = train_labels + (dev_labels if dev_labels is not None else [])
+                normalizer = TagNormalizer().train(normal_tags)
             additional_train_datasets = defaultdict(list)
             additional_read_params = params.get("additional_read_params", train_read_params)
             if isinstance(additional_read_params, dict):
@@ -224,18 +237,12 @@ if __name__ == '__main__':
                 curr_labels = [[normalizer.transform(x, mode="UD") for x in elem] for elem in curr_labels]
                 additional_train_labels.append(curr_labels)
             if "tag_normalizer_save_file" in params:
-                save_file = params["tag_normalizer_save_file"]
-                normalizer.to_json(save_file)
-                other_normalizer = load_tag_normalizer(save_file)
-                for (attr, val) in inspect.getmembers(normalizer):
-                    if not (attr.startswith("__") or inspect.ismethod(val)):
-                        other_val = getattr(other_normalizer, attr)
-                        print(attr, val == other_val)
+                normalizer.to_json(params["tag_normalizer_save_file"])
         else:
             additional_train_data, additional_train_labels = None, None
-        sys.exit()
         cls.train(train_data, train_labels, dev_data, dev_labels,
                   additional_train_data, additional_train_labels,
+                  train_params=params["train_params"],
                   model_file=params["model_file"], save_file=params["save_file"],
                   lm_file=params["lm_file"], **params["vocabulary_files"])
     elif params["load_file"] is not None:
@@ -244,13 +251,20 @@ if __name__ == '__main__':
         raise ValueError("Either train_file or load_file should be given")
     if params["save_file"] is not None and params["dump_file"] is not None:
         cls.to_json(params["save_file"], params["dump_file"])
+    test_files, test_dataset_codes = [], []
     if params["test_files"] is not None:
-        test_read_params = copy.deepcopy(params["read_params"])
-        test_read_params.update(params["test_read_params"])
         # defining output files
         test_files = params["test_files"]
         if isinstance(test_files, str):
             test_files = [test_files]
+        test_dataset_codes = [0] * len(test_files)
+    if len(params["additional_test_files"]) > 0:
+        for infile, code in params["additional_test_files"]:
+            test_files.append(infile)
+            test_dataset_codes.append(code)
+    if len(test_files) > 0:
+        test_read_params = copy.deepcopy(params["read_params"])
+        test_read_params.update(params["test_read_params"])
         prediction_files = make_file_params_list(params["prediction_files"], len(test_files),
                                                  name="prediction_files")
         outfiles = make_file_params_list(params["outfiles"], len(test_files),
@@ -264,17 +278,20 @@ if __name__ == '__main__':
         # loading language model if available
         lm = (cls.lm_ if hasattr(cls, "lm_") else
               load_lm(params["lm_file"]) if params["lm_file"] is not None else None)
-        for (test_file, prediction_file, outfile, comparison_file,
-                gh_outfile, gh_comparison_file) in zip(
-                    test_files, prediction_files, outfiles,
+        for (test_file, dataset_code, prediction_file, outfile,
+             comparison_file, gh_outfile, gh_comparison_file) in zip(
+                    test_files, test_dataset_codes, prediction_files, outfiles,
                     comparison_files, gh_outfiles, gh_comparison_files):
             test_data, source_data = read_tags_infile(
                 test_file, read_words=True, return_source_words=True, **test_read_params)
             if not test_read_params.get("read_only_words", False):
                 test_data, test_labels = [x[0] for x in test_data], [x[1] for x in test_data]
+                if normalizer is not None and dataset_code > 0:
+                    test_labels = [[normalizer.transform(x, mode="UD") for x in elem]
+                                   for elem in test_labels]
             else:
                 test_labels = None
-            cls_predictions = cls.predict(test_data, **params["predict_params"])
+            cls_predictions = cls.predict(test_data, dataset_codes=dataset_code, **params["predict_params"])
             predictions, probs = cls_predictions[:2]
             basic_probs = cls_predictions[2] if len(cls_predictions) > 2 else None
             if prediction_file is not None:
@@ -284,7 +301,8 @@ if __name__ == '__main__':
                             probs, basic_probs, lm, outfile, comparison_file)
                 if hasattr(cls, "lm_") and gh_outfile is not None:
                     print("Using gold history:")
-                    cls_predictions = cls.predict(test_data, test_labels, **params["predict_params"])
+                    cls_predictions = cls.predict(test_data, test_labels, dataset_codes=dataset_code,
+                                                  **params["predict_params"])
                     predictions, probs = cls_predictions[:2]
                     basic_probs = cls_predictions[2] if len(cls_predictions) > 2 else None
                     make_output(cls, test_data, test_labels, predictions, probs, basic_probs,
