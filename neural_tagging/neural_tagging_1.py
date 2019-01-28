@@ -115,6 +115,8 @@ def training_parameter(name):
         return instance.train_params_[name]
 
     def _setter(instance, value):
+        if not hasattr(instance, "train_params_"):
+            instance.train_params_ = dict()
         instance.train_params_[name] = value
 
     return property(_getter, _setter)

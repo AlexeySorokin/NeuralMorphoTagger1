@@ -23,8 +23,8 @@
     "train_params": {
         "nepochs": 50, "freeze_after_transfer": false,
         "batch_params": {
-            "0": {"first_epoch": 2}, "1": {"decay_epoch": 2, "decay": 0.1},
-            "2": {"decay_epoch": 2, "decay": 0.1}}
+            "0": {"first_epoch": 6}, "1": {"decay_epoch": 6, "decay": 0.1},
+            "2": {"decay_epoch": 6, "decay": 0.1}}
     },
     "tag_normalizer_save_file": "neural_tagging/models/tag_normalizers/beruuk-2",
     "read_params": {"to_lower": true, "append_case": "first"},
