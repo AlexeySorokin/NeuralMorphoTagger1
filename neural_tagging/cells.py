@@ -3,11 +3,59 @@ import numpy as np
 import keras.backend as kb
 import keras.layers as kl
 import keras.activations as kact
+import keras.regularizers as kreg
 import keras.initializers as kinit
 from keras.engine.topology import InputSpec
 
 INFTY = -100
 from neural_LM.common import PAD
+
+
+class DistanceMatcher(kl.Layer):
+
+    def __init__(self, input_dim, units, activation=None,
+                 normalize=False, kernel_initializer='glorot_uniform',
+                 kernel_regularizer=None, activity_regularizer=None, **kwargs):
+        if 'input_shape' not in kwargs:
+            kwargs['input_shape'] = (input_dim,)
+        super(DistanceMatcher, self).__init__(**kwargs)
+        self.input_dim = input_dim
+        self.units = units
+        self.activation = kact.get(activation)
+        self.normalize = normalize
+        self.kernel_initializer = kinit.get(kernel_initializer)
+        self.kernel_regularizer = kreg.get(kernel_regularizer)
+        self.activity_regularizer = kreg.get(activity_regularizer)
+        self.input_spec = InputSpec(min_ndim=2, axes={-1: self.input_dim})
+
+    def build(self, input_shape):
+        assert len(input_shape) >= 2
+        self.kernel = self.add_weight(shape=(self.input_dim, self.units),
+                                      initializer=self.kernel_initializer,
+                                      name='kernel',
+                                      regularizer=self.kernel_regularizer)
+        self.built = True
+
+    def call(self, inputs):
+        xx = kb.expand_dims(kb.sum(inputs * inputs, axis=-1), -1)
+        aa = kb.expand_dims(kb.sum(self.kernel * self.kernel, axis=-2), -2)
+        xa = kb.dot(inputs, self.kernel)
+        answer = xx + aa - 2 * xa
+        if self.normalize:
+            answer /= self.input_dim
+        answer = kb.sqrt(answer)
+        answer = kb.expand_dims(kb.max(answer, axis=-1), axis=-1) - answer
+        if self.activation is not None:
+            answer = self.activation(answer)
+        return answer
+
+    def compute_output_shape(self, input_shape):
+        assert input_shape and len(input_shape) >= 2 and input_shape[-1]
+        output_shape = list(input_shape)
+        output_shape[-1] = self.units
+        return tuple(output_shape)
+
+
 
 class Highway(kl.Layer):
 

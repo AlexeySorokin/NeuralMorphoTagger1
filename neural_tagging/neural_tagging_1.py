@@ -23,7 +23,8 @@ from neural_LM.common import *
 from neural_LM.common_new import DataGenerator, MultirunEarlyStopping
 from neural_LM import load_lm
 from neural_LM.cells import SelfAttentionEncoder, SelfAttentionDecoder, LayerNorm1D, WeightedSum
-from neural_tagging.cells import Highway, WeightedCombinationLayer, TemporalDropout, leader_loss, positions_func
+from neural_tagging.cells import Highway, WeightedCombinationLayer, DistanceMatcher,\
+    TemporalDropout, leader_loss, positions_func
 from neural_tagging.dictionary import read_dictionary
 from neural_tagging.vectorizers import UnimorphVectorizer, MatchingVectorizer, load_vectorizer
 
@@ -148,6 +149,7 @@ class CharacterTagger:
                  char_highway_layers = 1, conv_dropout = 0.0, highway_dropout = 0.0,
                  intermediate_dropout = 0.0, word_dropout=0.0, lm_dropout=0.0,
                  word_lstm_layers=1, word_lstm_units=128, lstm_dropout = 0.0,
+                 use_nearest_neighbours=False,
                  use_rnn_for_weight_state=False, weight_state_rnn_units=64,
                  use_fusion=False, fusion_state_units=256, use_dimension_bias=False,
                  use_intermediate_activation_for_weights=False,
@@ -186,6 +188,7 @@ class CharacterTagger:
         self.word_dropout = word_dropout
         self.word_lstm_layers = word_lstm_layers
         self.word_lstm_units = word_lstm_units
+        self.use_nearest_neighbours = use_nearest_neighbours
         self.lstm_dropout = lstm_dropout
         self.lm_dropout = lm_dropout
         self.use_rnn_for_weight_state = use_rnn_for_weight_state
@@ -374,13 +377,6 @@ class CharacterTagger:
     @property
     def has_additional_inputs(self):
         return int(self.additional_inputs_number > 0)
-
-    ### Properties for training parameters ###
-
-
-
-
-    ###
 
     def _make_word_dictionary(self, data=None):
         self._make_word_tag_mapper(data)
@@ -1095,10 +1091,13 @@ class CharacterTagger:
                 if self.regularizer is not None:
                     pre_outputs = kl.ActivityRegularization(l2=self.regularizer.l2)(pre_outputs)
             else:
-                pre_outputs = kl.TimeDistributed(
-                    kl.Dense(self.tags_number_, activation="softmax",
-                             activity_regularizer=self.regularizer),
-                name="p")(lstm_outputs)
+                if self.use_nearest_neighbours:
+                    output_layer = DistanceMatcher(2 * self.word_lstm_units[-1], self.tags_number_,
+                                                   activation="softmax", activity_regularizer=self.regularizer)
+                else:
+                    output_layer = kl.Dense(self.tags_number_, activation="softmax",
+                                            activity_regularizer=self.regularizer)
+                pre_outputs = kl.TimeDistributed(output_layer, name="p")(lstm_outputs)
         return pre_outputs, lstm_outputs
 
     def _freeze_output_network(self):
