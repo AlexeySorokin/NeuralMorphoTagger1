@@ -28,6 +28,8 @@ DEFAULT_LIST_PARAMS = ["vectorizers", "additional_train_files",
 DEFAULT_DICT_PARAMS = ["model_params", "read_params", "predict_params", "vocabulary_files",
                        "train_read_params", "dev_read_params", "test_read_params",
                        "train_params"]
+DEFAULT_DICT_WITH_KEY_PARAMS = {"dev_split_params": ["shuffle", "validation_split"]}
+
 
 TRAIN_KEYS = ["batch_size", "validation_split", "nepochs",
               "transfer_warmup_epochs", "freeze_after_transfer", "batch_params"]
@@ -44,6 +46,13 @@ def read_config(infile):
         params[param] = from_json.get(param, dict())
     for param, default_value in DEFAULT_PARAMS.items():
         params[param] = from_json.get(param, default_value)
+    for param, keys in DEFAULT_DICT_WITH_KEY_PARAMS.items():
+        value = from_json.get(param)
+        if value is not None:
+            for key in keys:
+                if key not in value:
+                    raise KeyError("Field {} must be present in parameter {}.".format(key, param))
+        params[param] = value
     for param, value in from_json.items():
         if param not in params:
             params[param] = value

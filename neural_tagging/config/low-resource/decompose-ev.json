@@ -1,0 +1,21 @@
+{
+	"train_files": ["data/low-resource/splitted/evn.train.ud"],
+    "dev_files": ["data/low-resource/splitted/evn.dev.ud"],
+    "test_files": ["data/low-resource/splitted/evn.dev.ud"],
+    "outfiles": ["neural_tagging/results/low-resource/evn-basic.out"],
+    "model_file": "neural_tagging/models/low-resource/ev-word.hdf5",
+    "save_file": "neural_tagging/models/low-resource/ev-word.json",
+    "load_file": "neural_tagging/models/low-resource/ev-word.json",
+    "model_params": {
+        "use_lm_loss": false, "use_lm": false, "normalize_lm_embeddings": false,
+        "min_char_count": 3, "char_embeddings_size": 32, "decompose_labels": true,
+        "char_window_size": [1, 2, 3, 4, 5, 6, 7],
+        "word_lstm_units": 128, "nepochs": 25, "char_conv_layers": 1,
+        "char_highway_layers": 1, "highway_dropout": 0.0, "word_lstm_layers": 1,
+        "char_filter_multiple": 50, "intermediate_dropout": 0.0,
+        "word_dropout": 0.2, "lstm_dropout": 0.2, "conv_dropout": 0.0,
+        "regularizer": 0.001, "lm_dropout": 0.2
+    },
+    "read_params": {"to_lower": true, "append_case": "first"},
+    "stop_callback": {"patience": 5, "monitor": "val_multioutput_acc"}
+}

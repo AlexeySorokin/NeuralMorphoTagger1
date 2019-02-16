@@ -17,14 +17,15 @@ from keras.activations import softmax
 
 from neural_LM.UD_preparation.read_tags import is_subsumed, descr_to_feats
 from neural_LM.UD_preparation.extract_tags_from_UD import decode_word
-from neural_LM.vocabulary import Vocabulary, FeatureVocabulary, vocabulary_from_json
+from neural_LM.vocabulary import Vocabulary, FeatureVocabulary, DecomposingVocabulary, vocabulary_from_json
 from neural_LM.neural_LM import make_bucket_indexes
 from neural_LM.common import *
 from neural_LM.common_new import DataGenerator, MultirunEarlyStopping
 from neural_LM import load_lm
 from neural_LM.cells import SelfAttentionEncoder, SelfAttentionDecoder, LayerNorm1D, WeightedSum
 from neural_tagging.cells import Highway, WeightedCombinationLayer, DistanceMatcher,\
-    TemporalDropout, leader_loss, positions_func
+    TemporalDropout, leader_loss, positions_func,\
+    multioutput_categorical_crossentropy, MultioutputAccuracy
 from neural_tagging.dictionary import read_dictionary
 from neural_tagging.vectorizers import UnimorphVectorizer, MatchingVectorizer, load_vectorizer
 
@@ -60,7 +61,7 @@ def load_tagger(infile):
         if key == "symbols_":
             value = vocabulary_from_json(value)
         elif key == "tags_":
-            value = vocabulary_from_json(value, use_features=True)
+            value = vocabulary_from_json(value, use_features=True, decompose_labels=tagger.decompose_labels)
         elif key == "tag_embeddings_":
             value = np.asarray(value)
         elif key == "morpho_dict_":
@@ -149,7 +150,7 @@ class CharacterTagger:
                  char_highway_layers = 1, conv_dropout = 0.0, highway_dropout = 0.0,
                  intermediate_dropout = 0.0, word_dropout=0.0, lm_dropout=0.0,
                  word_lstm_layers=1, word_lstm_units=128, lstm_dropout = 0.0,
-                 use_nearest_neighbours=False,
+                 decompose_labels=False, use_nearest_neighbours=False,
                  use_rnn_for_weight_state=False, weight_state_rnn_units=64,
                  use_fusion=False, fusion_state_units=256, use_dimension_bias=False,
                  use_intermediate_activation_for_weights=False,
@@ -188,6 +189,7 @@ class CharacterTagger:
         self.word_dropout = word_dropout
         self.word_lstm_layers = word_lstm_layers
         self.word_lstm_units = word_lstm_units
+        self.decompose_labels = decompose_labels
         self.use_nearest_neighbours = use_nearest_neighbours
         self.lstm_dropout = lstm_dropout
         self.lm_dropout = lm_dropout
@@ -325,6 +327,7 @@ class CharacterTagger:
             if not (attr.startswith("__") or inspect.ismethod(val) or
                     isinstance(getattr(CharacterTagger, attr, None), property) or
                     isinstance(val, np.ndarray) or isinstance(val, Vocabulary) or
+                    isinstance(val, DecomposingVocabulary) or
                     attr.isupper() or isinstance(val, kb.Function) or
                     attr in ["callbacks", "_compile_args", "batching_probs_", "train_params_",
                              "model_", "_basic_model_", "warmup_model_",
@@ -333,7 +336,7 @@ class CharacterTagger:
                              "regularizer", "fusion_regularizer",
                              "word_vectorizers", "word_tag_vectorizers"]):
                 info[attr] = val
-            elif isinstance(val, Vocabulary):
+            elif isinstance(val, (Vocabulary, DecomposingVocabulary)):
                 info[attr] = val.jsonize()
             elif isinstance(val, np.ndarray):
                 val = val.tolist()
@@ -377,6 +380,12 @@ class CharacterTagger:
     @property
     def has_additional_inputs(self):
         return int(self.additional_inputs_number > 0)
+
+    @property
+    def outputs_number(self):
+        if self.decompose_labels:
+            return self.tags_.feats_number_ + 1
+        return 1
 
     def _make_word_dictionary(self, data=None):
         self._make_word_tag_mapper(data)
@@ -460,8 +469,15 @@ class CharacterTagger:
                 #                                func=length_func)]
                 if labels is not None:
                     tags = labels[i] if not self.reverse else labels[i][::-1]
-                    X[i].append(self._make_tags_vector(tags, bucket_length=bucket_length))
+                    if self.decompose_labels:
+                        sent_labels = np.array(self._make_tags_vector(tags, bucket_length=bucket_length))
+                        for k in range(self.outputs_number):
+                            X[i].append(sent_labels[:,k])
+                    else:
+                        X[i].append(self._make_tags_vector(tags, bucket_length=bucket_length))
             if labels is not None and hasattr(self, "lm_"):
+                if self.decompose_labels:
+                    raise NotImplementedError
                 curr_bucket = np.array([X[i][-1] for i in bucket_indexes])
                 padding = np.full((curr_bucket.shape[0], 1), BEGIN, dtype=int)
                 curr_bucket = np.hstack((padding, curr_bucket[:,:-1]))
@@ -560,7 +576,11 @@ class CharacterTagger:
         m = len(tags)
         if bucket_length is None:
             bucket_length = m
-        answer = np.zeros(shape=(bucket_length,), dtype=np.int32)
+        # answer = np.zeros(shape=(bucket_length,), dtype=np.int32)
+        if self.decompose_labels:
+            answer = np.zeros(shape=(bucket_length, self.outputs_number), dtype=int)
+        else:
+            answer = [0] * bucket_length
         for i, tag in enumerate(tags):
             answer[i] = self.tags_.toidx(tag) if func is None else func(tag)
         return answer
@@ -592,11 +612,13 @@ class CharacterTagger:
         else:
             self.symbols_ = vocabulary_from_json(symbol_vocabulary_file, use_features=False)
         if tags_vocabulary_file is None:
-            self.tags_ = FeatureVocabulary(character=False).train(labels)
+            cls = DecomposingVocabulary() if self.decompose_labels else FeatureVocabulary(character=False)
+            self.tags_ = cls.train(labels_for_vocab)
         else:
             with open(tags_vocabulary_file, "r", encoding="utf8") as fin:
                 tags_info = json.load(fin)
-            self.tags_ = vocabulary_from_json(tags_info, use_features=True)
+            self.tags_ = vocabulary_from_json(
+                tags_info, use_features=True, decompose_labels=self.decompose_labels)
         if self.verbose > 0:
             print("{} characters, {} tags".format(self.symbols_number_, self.tags_number_))
         # language model
@@ -671,7 +693,7 @@ class CharacterTagger:
             train_dataset_codes_by_buckets = [0] * len(train_indexes_by_buckets)
         if dev_dataset_codes_by_buckets is None:
             dev_dataset_codes_by_buckets = [0] * len(dev_indexes_by_buckets)
-        # if hasattr(self, "lm_") and self.n_warmup_epochs > 0:
+        # if self.n_warmup_epochs > 0:
         #     fields_number = 1 + int(self.morpho_dict is not None)
         #     train_gen = generate_data(X, train_indexes_by_buckets, self.tags_number_,
         #                               self.batch_size, use_last=False,
@@ -686,7 +708,9 @@ class CharacterTagger:
         #         callbacks=self.callbacks, validation_data=dev_gen,
         #         validation_steps=dev_steps, verbose=1)
         if model_file is not None:
-            monitor = "val_p_output_acc" if self.use_lm else "val_acc"
+            monitor = ("val_multioutput_acc" if self.decompose_labels else
+                       "val_p_output_acc" if self.use_lm else
+                       "val_acc")
             callback = ModelCheckpoint(model_file, monitor=monitor,
                                        save_weights_only=True, save_best_only=True)
             if self.callbacks is not None:
@@ -718,11 +742,13 @@ class CharacterTagger:
                 dev_steps += (len(dev_indexes_by_buckets[i]) - 1) // self.batch_size + 1
             train_gen = DataGenerator(X, curr_train_indexes, self.tags_number_,
                                       batch_size=self.batch_size, duplicate_answer=self.use_lm,
+                                      answers_number=self.outputs_number,
                                       fields_to_one_hot={0: self.symbols_number_},
                                       yield_weights=self.to_weigh_loss, weights=weights)
             if dev_steps > 0:
                 dev_gen = DataGenerator(X_dev, curr_dev_indexes, self.tags_number_,
                                         batch_size=self.batch_size, shuffle=False,
+                                        answers_number=self.outputs_number,
                                         duplicate_answer=self.use_lm,
                                         fields_to_one_hot={0: self.symbols_number_},
                                         yield_weights=self.to_weigh_loss)
@@ -805,11 +831,18 @@ class CharacterTagger:
                 bucket_basic_probs = [None] * len(bucket_indexes)
                 if isinstance(bucket_probs, list):
                     bucket_probs, bucket_basic_probs = bucket_probs
-                bucket_labels = np.argmax(bucket_probs, axis=-1)
+                if self.decompose_labels:
+                    slice_bounds = [0] + list(np.cumsum(self.tags_number_))
+                    bucket_prob_slices = [bucket_probs[...,start:end]
+                                          for start, end in zip(slice_bounds[:-1], slice_bounds[1:])]
+                    bucket_labels = [np.argmax(elem, axis=-1) for elem in bucket_prob_slices]
+                    bucket_labels = np.transpose(bucket_labels, [1,2,0])
+                else:
+                    bucket_labels = np.argmax(bucket_probs, axis=-1)
             for curr_labels, curr_probs, curr_basic_probs, index in\
                     zip(bucket_labels, bucket_probs, bucket_basic_probs, bucket_indexes):
                 curr_labels = curr_labels[:len(data[index])]
-                curr_labels = [self.tags_.symbols_[label] for label in curr_labels]
+                curr_labels = [self.tags_.fromidx(label) for label in curr_labels]
                 answer[index], probs[index] = curr_labels, curr_probs[:len(data[index])]
                 basic_probs[index] = curr_basic_probs
         return ((answer, probs, basic_probs) if (return_basic_probs and self.use_lm)
@@ -979,10 +1012,11 @@ class CharacterTagger:
         inputs.extend(additional_word_tag_inputs)
         basic_inputs.extend(additional_word_tag_inputs)
         pre_outputs, states = self._build_basic_network(word_outputs, additional_word_tag_inputs)
-        loss = (leader_loss(self.leader_loss_weight) if self.use_leader_loss
-                else "categorical_crossentropy")
-        compile_args = {"optimizer": ko.nadam(clipnorm=5.0),
-                        "loss": loss, "metrics": ["accuracy"]}
+        loss = (multioutput_categorical_crossentropy if self.decompose_labels else
+                leader_loss(self.leader_loss_weight) if self.use_leader_loss else
+                "categorical_crossentropy")
+        metric = MultioutputAccuracy(self.tags_number_) if self.decompose_labels else "accuracy"
+        compile_args = {"optimizer": ko.nadam(clipnorm=5.0), "loss": loss, "metrics": [metric]}
         if hasattr(self, "lm_"):
             position_inputs = kl.Lambda(positions_func)(word_inputs)
             if self.use_fusion:
@@ -1077,9 +1111,10 @@ class CharacterTagger:
             lstm_outputs = kl.Bidirectional(
                 kl.LSTM(self.word_lstm_units[j], return_sequences=True,
                         dropout=self.lstm_dropout, name="word_lstm_{}".format(j+1)))(lstm_outputs)
-        lstm_outputs = kl.Bidirectional(
-            kl.LSTM(self.word_lstm_units[-1], return_sequences=True, dropout=self.lstm_dropout,
-                    name="word_lstm_{}".format(self.word_lstm_layers)))(lstm_outputs)
+        if self.word_lstm_layers > 0:
+            lstm_outputs = kl.Bidirectional(
+                kl.LSTM(self.word_lstm_units[-1], return_sequences=True, dropout=self.lstm_dropout,
+                        name="word_lstm_{}".format(self.word_lstm_layers)))(lstm_outputs)
         if hasattr(self, "tag_embeddings_"):
             pre_outputs = self.tag_embeddings_output_layer(lstm_outputs)
         else:
@@ -1094,10 +1129,20 @@ class CharacterTagger:
                 if self.use_nearest_neighbours:
                     output_layer = DistanceMatcher(2 * self.word_lstm_units[-1], self.tags_number_,
                                                    activation="softmax", activity_regularizer=self.regularizer)
+                    pre_outputs = [kl.TimeDistributed(elem, name="p_{}".format(k + 1))(lstm_outputs)
+                                   for k, elem in enumerate(output_layer)]
                 else:
-                    output_layer = kl.Dense(self.tags_number_, activation="softmax",
-                                            activity_regularizer=self.regularizer)
-                pre_outputs = kl.TimeDistributed(output_layer, name="p")(lstm_outputs)
+                    if self.decompose_labels:
+                        output_layer = [kl.Dense(curr_tags_number, activation="softmax",
+                                                 activity_regularizer=self.regularizer)
+                                        for curr_tags_number in self.tags_number_]
+                        pre_outputs = [kl.TimeDistributed(elem, name="p_{}".format(k+1))(lstm_outputs)
+                                       for k, elem in enumerate(output_layer)]
+                        pre_outputs = kl.Concatenate(name="p", axis=-1)(pre_outputs)
+                    else:
+                        output_layer = kl.Dense(self.tags_number_, activation="softmax",
+                                                activity_regularizer=self.regularizer)
+                        pre_outputs = kl.TimeDistributed(output_layer, name="p")(lstm_outputs)
         return pre_outputs, lstm_outputs
 
     def _freeze_output_network(self):

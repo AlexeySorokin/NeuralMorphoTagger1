@@ -6,6 +6,7 @@ import keras.activations as kact
 import keras.regularizers as kreg
 import keras.initializers as kinit
 from keras.engine.topology import InputSpec
+from keras.metrics import categorical_accuracy
 
 INFTY = -100
 from neural_LM.common import PAD
@@ -204,6 +205,43 @@ def TemporalDropout(inputs, dropout=0.0):
                             output_shape=inputs._keras_shape[1:])(inputs_mask)
     answer = kl.Multiply()([inputs, inputs_mask])
     return answer
+
+
+def multioutput_categorical_crossentropy(y_true, y_pred):
+    """
+    Calculates standard crossentropy on concatenated
+    vectors of probabilities for models with multiple categorical outputs
+
+    :param y_true:
+    :param y_pred:
+    :return:
+    """
+    epsilon = kb.common.epsilon()
+    y_pred = kb.clip(y_pred, epsilon, 1.0 - epsilon)
+    return -kb.sum(y_true * kb.log(y_pred), axis=-1)
+
+
+class MultioutputAccuracy:
+
+    def __init__(self, bin_lengths):
+        self.partitions = np.zeros(shape=(len(bin_lengths) + 1), dtype=int)
+        self.partitions[1:] = np.cumsum(bin_lengths)
+        self.name = "multioutput_acc"
+
+    def __call__(self, y_true, y_pred):
+        dim = kb.ndim(y_true)
+        permute_mask = [dim - 1] + list(range(dim - 1))
+        y_true_permuted = kb.permute_dimensions(y_true, permute_mask)
+        y_pred_permuted = kb.permute_dimensions(y_pred, permute_mask)
+        def _make_slices(y):
+            return [y[start:end] for start, end in zip(self.partitions[:-1], self.partitions[1:])]
+        true_slices, pred_slices = _make_slices(y_true_permuted), _make_slices(y_pred_permuted)
+        eq_slices = [kb.cast(kb.equal(kb.argmax(x, axis=0),  kb.argmax(y, axis=0)), kb.floatx())
+                     for x, y in zip(true_slices, pred_slices)]
+        eq_slices = kb.stack(eq_slices, axis=0)
+        are_equal = kb.min(eq_slices, axis=0)
+        return are_equal
+
 
 
 def leader_loss(weight):
