@@ -21,10 +21,9 @@ import keras.backend as kb
 import keras.layers as kl
 from keras.callbacks import EarlyStopping, ModelCheckpoint
 
-from .common import EPS
-from .common import AUXILIARY, BEGIN, END, UNKNOWN, PAD
-from .common import repeat_, generate_data
-from .common import CustomCallback
+from common.common import EPS, AUXILIARY, BEGIN, END, UNKNOWN, PAD
+from common.common import repeat_
+from common.generate import CustomCallback, generate_data
 from .vocabulary import Vocabulary, FeatureVocabulary, vocabulary_from_json
 from .cells import make_history, AttentionCell, AttentionCell3D
 from .UD_preparation.read_tags import descr_to_feats

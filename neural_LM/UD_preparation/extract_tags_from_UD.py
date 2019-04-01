@@ -116,6 +116,7 @@ def read_tags_infile(infile, read_words=False, to_lower=False,
                      tag_column=TAG_COLUMN, lemma_column=LEMMA_COLUMN,
                      read_only_words=False, return_source_words=False,
                      return_lemmas=False, return_source_text=False,
+                     read_feats=True, allow_multiple_tags=False,
                      max_sents=-1, to_shuffle=False):
     answer, curr_tag_sent, curr_word_sent = [], [], []
     source_answer, curr_source_sent = [], []
@@ -123,6 +124,7 @@ def read_tags_infile(infile, read_words=False, to_lower=False,
     source_texts, curr_source_text = [], []
     with open(infile, "r", encoding="utf8") as fin:
         print(infile)
+        last_digit = -1
         for line in fin:
             line = line.strip()
             if line.startswith("#"):
@@ -130,6 +132,8 @@ def read_tags_infile(infile, read_words=False, to_lower=False,
                 continue
             if line == "":
                 if len(curr_word_sent) > 0:
+                    # print(curr_word_sent)
+                    # print(curr_tag_sent)
                     to_append = (curr_word_sent if read_only_words
                                  else (curr_word_sent, curr_tag_sent))
                     answer.append(to_append)
@@ -139,27 +143,44 @@ def read_tags_infile(infile, read_words=False, to_lower=False,
                 curr_tag_sent, curr_word_sent = [], []
                 curr_source_sent, curr_lemma_sent = [], []
                 curr_source_text = []
+                last_digit = -1
                 if len(answer) == max_sents and not to_shuffle:
                     break
                 continue
             splitted = line.split("\t")
             index = splitted[0]
-            if not index.isdigit():
+            if not index.isdigit() and index != "_":
                 continue
+            index = int(index) if index != "_" else int(len(curr_tag_sent)) + 1
             word, lemma = splitted[word_column], splitted[lemma_column]
-            curr_source_sent.append(word)
-            word = process_word(word, to_lower=to_lower, append_case=append_case)
-            curr_word_sent.append(word)
-            curr_lemma_sent.append(lemma)
-            curr_source_text.append(line)
-            if not read_only_words:
-                pos, tag = splitted[pos_column], splitted[tag_column]
-                if pos == "PUNCT" and word in POS_MAPPING:
-                    pos = POS_MAPPING[word]
-                if tag == "_":
-                    curr_tag_sent.append(pos)
+            processed_word = process_word(word, to_lower=to_lower, append_case=append_case)
+            pos, tag = splitted[pos_column], (splitted[tag_column] if read_feats else "_")
+            if lemma == "UNKN":
+                lemma, pos = None, "UNKN"
+            if pos == "PUNCT" and word in POS_MAPPING:
+                pos = POS_MAPPING[word]
+            if tag == "_":
+                curr_tag = pos
+            else:
+                curr_tag = "{},{}".format(pos, tag)
+            if not allow_multiple_tags:
+                if index == last_digit:
+                    continue
+                curr_source_sent.append(word)
+                curr_word_sent.append(processed_word)
+                curr_lemma_sent.append(lemma)
+                curr_tag_sent.append(curr_tag)
+            else:
+                curr_source_sent.append(word)
+                if index != last_digit:
+                    curr_word_sent.append(processed_word)
+                    curr_lemma_sent.append([lemma])
+                    curr_tag_sent.append([curr_tag])
                 else:
-                    curr_tag_sent.append("{},{}".format(pos, tag))
+                    curr_lemma_sent[-1].append(lemma)
+                    curr_tag_sent[-1].append(curr_tag)
+            last_digit = index
+            curr_source_text.append(line)
         if len(curr_tag_sent) > 0:
             to_append = (curr_word_sent if read_only_words
                          else (curr_word_sent, curr_tag_sent))
@@ -194,6 +215,44 @@ def read_tags_infile(infile, read_words=False, to_lower=False,
     if return_source_text:
         answer.append(source_texts)
     return tuple(answer) if len(answer) > 1 else answer[0]
+
+
+def read_morphemes_infile(infile, tokenize=False):
+    answer = []
+    with open(infile, "r", encoding="utf8") as fin:
+        curr_sent = []
+        for line in fin:
+            line = line.strip()
+            if line == "":
+                if len(curr_sent) > 0:
+                    answer.append(curr_sent)
+                curr_sent = []
+                continue
+            try:
+                _, morph_data = line.split("\t")
+            except:
+                print(line)
+                sys.exit()
+            morph_data = morph_data.split(" ")
+            curr_word, curr_morphs, curr_morph_types = "", [], []
+            for i, elem in enumerate(morph_data):
+                if "_" in elem:
+                    morph, morph_type = elem.split("_")
+                else:
+                    morph = elem
+                    morph_type = "ROOT" if i == 0 else "?" if i < len(morph_data) - 1 else "PART"
+                if morph_type not in ["PART"] or not tokenize:
+                    curr_word += morph
+                    curr_morphs.append(morph)
+                    curr_morph_types.append(morph_type)
+                else:
+                    curr_sent.append((curr_word, curr_morph_types, curr_morphs))
+                    curr_word, curr_morph_types, curr_morphs = morph, ["ROOT"], [morph]
+            curr_sent.append((curr_word, curr_morph_types, curr_morphs))
+        if len(curr_sent) > 0:
+            answer.append(curr_sent)
+    return answer
+
 
 if __name__ == "__main__":
     L = len(sys.argv[1:])

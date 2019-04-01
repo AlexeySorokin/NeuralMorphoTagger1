@@ -12,11 +12,13 @@ import tensorflow as tf
 import keras.backend.tensorflow_backend as kbt
 from keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
-from neural_LM.common_new import MultirunEarlyStopping
+from common.generate import MultirunEarlyStopping
 from neural_LM.UD_preparation.extract_tags_from_UD import read_tags_infile, make_UD_pos_and_tag
 from neural_tagging.neural_tagging_1 import CharacterTagger, load_tagger
 from neural_LM import load_lm
 from neural_tagging.misc import TagNormalizer, load_tag_normalizer
+from read import read_substitution_file
+
 
 DEFAULT_NONE_PARAMS = ["model_file", "test_files", "outfiles", "train_files",
                        "dev_files", "dump_file", "save_file", "load_file", "lm_file",
@@ -87,8 +89,11 @@ def output_predictions(outfile, data, labels):
     with open(outfile, "w", encoding="utf8") as fout:
         for sent, sent_labels in zip(data, labels):
             for j, (word, label) in enumerate(zip(sent, sent_labels), 1):
-                label, tag = make_UD_pos_and_tag(label)
-                fout.write("{}\t{}\t{}\t{}\n".format(j, word, label, tag))
+                if not isinstance(label, list):
+                    label = [label]
+                for curr_label in label:
+                    pos, tag = make_UD_pos_and_tag(curr_label)
+                    fout.write("{}\t{}\t_\t{}\t_\t{}\n".format(j, word, pos, tag))
             fout.write("\n")
 
 
@@ -130,13 +135,18 @@ def output_results(outfile, data, pred_labels, corr_labels,
             fout.write("\n")
 
 
+def are_equal(test, pred):
+    if isinstance(test, list):
+        return all(a in test for a in pred) or test == ["UNKN"]
+    return test == pred
+
 def make_output(cls, test_data, test_labels, predictions, probs, basic_probs=None,
                 lm=None, outfile=None, comparison_file=None, gold_history=False):
     return_basic_probs = (basic_probs is not None)
     corr, total, corr_sent = 0, 0, 0
     for pred, test in zip(predictions, test_labels):
         total += len(test)
-        curr_corr = sum(int(x == y) for x, y in zip(pred, test))
+        curr_corr = sum(are_equal(x, y) for x, y in zip(test, pred))
         corr += curr_corr
         corr_sent += int(len(test) == curr_corr)
     print("Точность {:.2f}: {} из {} меток".format(100 * corr / total, corr, total))
@@ -145,9 +155,20 @@ def make_output(cls, test_data, test_labels, predictions, probs, basic_probs=Non
     if outfile is not None:
         with open(outfile, "w", encoding="utf8") as fout:
             for sent, pred, test in zip(test_data, predictions, test_labels):
-                for word, pred_tag, corr_tag in zip(sent, pred, test):
-                    format_string = "{0}\t{1}\t{2}" + ("\tERROR\n" if pred_tag != corr_tag else "\n")
-                    fout.write(format_string.format("".join(word), corr_tag, pred_tag))
+                for r, (word, pred_tag, corr_tag) in enumerate(zip(sent, pred, test), 1):
+                    if isinstance(corr_tag, list):
+                        wrong_tags = [x for x in corr_tag if x not in pred_tag]
+                        has_errors = not are_equal(corr_tag, pred_tag)
+                        for curr_pred_tag in pred_tag:
+                            has_error = has_errors and curr_pred_tag not in corr_tag
+                            format_string = "{0}\t{1}\t{2}" + ("\tERROR\n" if has_error else "\n")
+                            fout.write(format_string.format(r, "".join(word), curr_pred_tag))
+                        # if len(wrong_tags) > 0:
+                        #     fout.write("\n".join(wrong_tags) + "\n")
+                        fout.write("\n".join(corr_tag) + "\n")
+                    else:
+                        format_string = "{0}\t{1}\t{2}\t{3}" + ("\tERROR\n" if pred_tag != corr_tag else "\n")
+                        fout.write(format_string.format(r, "".join(word), corr_tag, pred_tag))
                 fout.write("\n")
     if comparison_file is not None:
         # считаем вероятности правильных слов
@@ -187,7 +208,7 @@ def make_output(cls, test_data, test_labels, predictions, probs, basic_probs=Non
 
 if __name__ == '__main__':
     config = tf.ConfigProto()
-    config.gpu_options.per_process_gpu_memory_fraction = 0.4
+    config.gpu_options.per_process_gpu_memory_fraction = 0.2
     kbt.set_session(tf.Session(config=config))
     random.seed(167)
     if len(sys.argv[1:]) != 1:
@@ -249,8 +270,13 @@ if __name__ == '__main__':
                 normalizer.to_json(params["tag_normalizer_save_file"])
         else:
             additional_train_data, additional_train_labels = None, None
+        if "word_substitution_file" in params:
+            words_to_substitute = read_substitution_file(params["word_substitution_file"])
+        else:
+            words_to_substitute = None
         cls.train(train_data, train_labels, dev_data, dev_labels,
                   additional_train_data, additional_train_labels,
+                  words_to_substitute=words_to_substitute,
                   train_params=params["train_params"],
                   model_file=params["model_file"], save_file=params["save_file"],
                   lm_file=params["lm_file"], **params["vocabulary_files"])

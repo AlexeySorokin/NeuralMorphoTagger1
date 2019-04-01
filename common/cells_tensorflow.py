@@ -104,6 +104,7 @@ def expand_number_to_shape(a, b):
         a = tf.expand_dims(a, axis=-1)
     return tf.tile(a, tf.shape(b))
 
+
 def batch_add_offset_bias(x, q, bias, transpose_bias=True):
     # performs x_{rij} = x_{rij} + dot(q_{ri}, bias_{clip(j-i, -k, k)}),
     # where clip(a, l, r) = max(l, min(a, r)),

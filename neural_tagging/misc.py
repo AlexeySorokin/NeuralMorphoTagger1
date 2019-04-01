@@ -6,6 +6,7 @@ import ujson as json
 
 from neural_LM.UD_preparation.extract_tags_from_UD import *
 
+
 def load_tag_normalizer(infile):
     with open(infile, "r", encoding="utf8") as fin:
         data = json.load(fin)
@@ -43,7 +44,7 @@ class TagNormalizer:
             json.dump(data, fout)
 
     def train(self, labels):
-        if isinstance(labels[0], list):
+        while isinstance(labels[0], list):
             labels = list(chain.from_iterable(labels))
         labels = [make_UD_pos_and_tag(label, return_mode="items") for label in labels]
         self.labels = set(labels)
@@ -103,6 +104,8 @@ class TagNormalizer:
         return self
 
     def transform(self, tag, mode=None):
+        if isinstance(tag, list):
+            return [self.transform(x, mode=mode) for x in tag]
         pos, feats = make_UD_pos_and_tag(tag, return_mode="items")
         if pos not in self.pos:
             return pos if mode == "UD" else (pos, tuple())

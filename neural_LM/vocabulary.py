@@ -2,8 +2,7 @@ from collections import defaultdict
 import inspect
 import itertools
 
-from .common import *
-from .UD_preparation.read_tags import descr_to_feats
+from common.common import *
 from neural_LM.UD_preparation.extract_tags_from_UD import make_UD_pos_and_tag, make_full_UD_tag
 
 
@@ -28,9 +27,10 @@ def vocabulary_from_json(info, use_features=False, decompose_labels=False):
 
 class Vocabulary:
 
-    def __init__(self, character=False, min_count=1):
+    def __init__(self, character=False, min_count=1, special_tokens=None):
         self.character = character
         self.min_count = min_count
+        self.special_tokens = special_tokens or dict()
 
     def train(self, text):
         symbols = defaultdict(int)
@@ -46,10 +46,18 @@ class Vocabulary:
         self.symbol_codes_ = {x: i for i, x in enumerate(self.symbols_)}
         return self
 
-    def toidx(self, x):
+    def _toidx(self, x):
+        x = self.special_tokens.get(x, x)
         return self.symbol_codes_.get(remove_token_field(x), UNKNOWN)
 
+    def toidx(self, tag):
+        if isinstance(tag, list):
+            return [self._toidx(x) for x in tag]
+        return self._toidx(tag)
+
     def fromidx(self, label):
+        if isinstance(label, list) or isinstance(label, np.ndarray):
+            return [self.symbols_[x] for x in label]
         return self.symbols_[label]
 
     @property
@@ -77,9 +85,11 @@ def remove_token_fields(text):
 
 class FeatureVocabulary(Vocabulary):
 
-    def __init__(self, character=False, use_tokens=False, min_count=1):
-        super().__init__(character=character, min_count=min_count)
+    def __init__(self, character=False, use_tokens=False, min_count=1,
+                 to_disambiguate=True, special_tokens=None):
+        super().__init__(character=character, min_count=min_count, special_tokens=special_tokens)
         self.use_tokens = use_tokens
+        self.to_disambiguate = to_disambiguate
 
     def _disambig(self, x):
         symbol, feats = make_UD_pos_and_tag(x, return_mode="items")
@@ -94,13 +104,23 @@ class FeatureVocabulary(Vocabulary):
         return [make_full_UD_tag(symbol, elem, mode="items") for elem in possible_feats]
 
     def toidx(self, x, return_single=True):
-        possible_tags = self._disambig(x)
+        # possible_tags = self._disambig(x)
+        possible_tags = x if isinstance(x, list) else [x]
         if len(possible_tags) == 1:
             return super().toidx(x)
         elif return_single:
             return super().toidx(possible_tags[0])
         else:
             return [super().toidx(elem) for elem in possible_tags]
+
+    def _make_train_sent(self, sent):
+        answer = []
+        for elem in sent:
+            if isinstance(elem, list):
+                answer.extend(elem)
+            else:
+                answer.append(elem)
+        return answer
 
     def train(self, text, tokens=None):
         if self.use_tokens:
@@ -109,8 +129,7 @@ class FeatureVocabulary(Vocabulary):
             text = remove_token_fields(text)
         else:
             tokens = None
-        text_to_train = [list(itertools.chain.from_iterable(
-            (self._disambig(x) for x in sent))) for sent in text]
+        text_to_train = [self._make_train_sent(sent) for sent in text]
         super().train(text_to_train)
         self._make_features(tokens=tokens)
         return self
@@ -154,6 +173,9 @@ class FeatureVocabulary(Vocabulary):
         if x not in self.token_codes_:
             return None
         return self.token_codes_[x] + len(self.symbol_labels_)
+
+    def get_symbol_code(self, x):
+        return self.symbol_codes_.get(x, UNKNOWN)
 
     @property
     def symbol_vector_size_(self):

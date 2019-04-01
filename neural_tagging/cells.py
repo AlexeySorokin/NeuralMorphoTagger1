@@ -1,4 +1,5 @@
 import numpy as np
+import tensorflow as tf
 
 import keras.backend as kb
 import keras.layers as kl
@@ -6,10 +7,10 @@ import keras.activations as kact
 import keras.regularizers as kreg
 import keras.initializers as kinit
 from keras.engine.topology import InputSpec
-from keras.metrics import categorical_accuracy
+from keras.metrics import categorical_accuracy, binary_accuracy
 
 INFTY = -100
-from neural_LM.common import PAD
+from common.common import PAD
 
 
 class DistanceMatcher(kl.Layer):
@@ -207,6 +208,13 @@ def TemporalDropout(inputs, dropout=0.0):
     return answer
 
 
+def first_sigmoid_acc(y_true, y_pred):
+    max_values = kb.max(y_pred, axis=-1)
+    first_positive_indexes = kb.argmax(kb.cast(y_pred >= 0.5, kb.floatx()), axis=-1)
+    first_pred = kb.switch(max_values >= 0.5, first_positive_indexes, kb.argmax(y_pred, axis=-1))
+    return kb.cast(kb.equal(kb.argmax(y_true, axis=-1), first_pred), kb.floatx())
+
+
 def multioutput_categorical_crossentropy(y_true, y_pred):
     """
     Calculates standard crossentropy on concatenated
@@ -219,7 +227,6 @@ def multioutput_categorical_crossentropy(y_true, y_pred):
     epsilon = kb.common.epsilon()
     y_pred = kb.clip(y_pred, epsilon, 1.0 - epsilon)
     return -kb.sum(y_true * kb.log(y_pred), axis=-1)
-
 
 class MultioutputAccuracy:
 
@@ -243,6 +250,50 @@ class MultioutputAccuracy:
         return are_equal
 
 
+class AmbigiousCategoricalEntropy:
+
+    def __init__(self, matrix=None, unknown_index=None, start_index=0,
+                 m=3, classes_number=None, min_pred=0.25):
+        self.unknown_index = unknown_index
+        self.start_index = start_index
+        self.m = m
+        if matrix is not None:
+            self.matrix = kb.constant(matrix)
+        elif classes_number is not None:
+            matrix = np.zeros(shape=(classes_number, classes_number))
+            if self.unknown_index is not None:
+                matrix[start_index:, unknown_index] = 1
+            self.matrix = kb.constant(matrix)
+        else:
+            self.matrix = None
+        self.min_pred = min_pred
+
+    def __call__(self, y_true, y_pred):
+        if self.matrix is not None:
+            y_pred_large = kb.switch(y_pred > self.min_pred, y_pred, kb.zeros_like(y_pred))
+            y_pred += kb.dot(y_pred_large, self.matrix)
+        scores = -kb.log(kb.sum(y_true * y_pred, axis=-1))
+        return scores
+
+class AmbigiousAccuracy:
+
+    def __init__(self, unknown_index=None):
+        if unknown_index is not None:
+            unknown_index = kb.constant(unknown_index, dtype="int64")
+        self.unknown_index = unknown_index
+        self.__name__ = "ambigious_accuracy"
+
+    def __call__(self, y_true, y_pred):
+        """
+        точность для нескольких правильных ответов
+        """
+        y_max_pred = kb.expand_dims(kb.max(y_pred, axis=-1), -1)
+        y_max_pred = kb.cast(y_pred >= y_max_pred, kb.floatx())
+        scores = kb.max(y_true * y_max_pred, axis=-1)
+        if self.unknown_index is not None:
+            are_unknown = kb.equal(kb.argmax(y_true, axis=-1), self.unknown_index)
+            scores = kb.maximum(kb.cast(are_unknown, kb.floatx()), scores)
+        return scores
 
 def leader_loss(weight):
     def _leader_loss(y_true, y_pred):
@@ -264,6 +315,8 @@ def positions_func(inputs):
     1+ln(1+i) when it contaings a meaningful symbol
     and with 0 when it contains PAD
     """
+    if kb.ndim(inputs) == 4:
+        inputs = kb.argmax(inputs, axis=-1)
     position_inputs = kb.cumsum(kb.ones_like(inputs, dtype="float32"), axis=1)
     position_inputs *= kb.cast(kb.not_equal(inputs, PAD), "float32")
     return kb.log(1.0 + position_inputs)

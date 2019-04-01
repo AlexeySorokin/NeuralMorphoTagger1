@@ -1,33 +1,30 @@
-import sys
 from collections import defaultdict
 import inspect
 import json
 import os
 import copy
-from typing import List
-from pathlib import Path
 # import statprof
 
 import keras.layers as kl
 import keras.optimizers as ko
 import keras.regularizers as kreg
+import keras.initializers as kint
 from keras import Model
 from keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
-from keras.activations import softmax
 
 from neural_LM.UD_preparation.read_tags import is_subsumed, descr_to_feats
 from neural_LM.UD_preparation.extract_tags_from_UD import decode_word
 from neural_LM.vocabulary import Vocabulary, FeatureVocabulary, DecomposingVocabulary, vocabulary_from_json
 from neural_LM.neural_LM import make_bucket_indexes
-from neural_LM.common import *
-from neural_LM.common_new import DataGenerator, MultirunEarlyStopping
-from neural_LM import load_lm
-from neural_LM.cells import SelfAttentionEncoder, SelfAttentionDecoder, LayerNorm1D, WeightedSum
+from common.common import *
+from common.generate import DataGenerator, make_batch
+from neural_LM.neural_lm import load_lm
 from neural_tagging.cells import Highway, WeightedCombinationLayer, DistanceMatcher,\
-    TemporalDropout, leader_loss, positions_func,\
-    multioutput_categorical_crossentropy, MultioutputAccuracy
+    TemporalDropout, leader_loss, positions_func
+from neural_tagging.cells import multioutput_categorical_crossentropy, MultioutputAccuracy,\
+    AmbigiousCategoricalEntropy, AmbigiousAccuracy
 from neural_tagging.dictionary import read_dictionary
-from neural_tagging.vectorizers import UnimorphVectorizer, MatchingVectorizer, load_vectorizer
+from neural_tagging.vectorizers import load_vectorizer
 
 BUCKET_SIZE = 32
 MAX_WORD_LENGTH = 30
@@ -79,11 +76,21 @@ def load_tagger(infile):
     # compiling morpho dictionary (if any)
     if tagger.morpho_dict is not None:
         tagger._make_morpho_dict_indexes_func(tagger.morpho_dict_params["type"])
+    # word tag vectorizers
+    word_tag_vectorizers = []
+    for i, data in enumerate(json_data.get("tag_vectorizer_save_data", [])):
+        cls, params = eval(data["cls"]), data.get("params", dict())
+        train_params = data.get("train_params", dict())
+        # save_file = data["save_file"]
+        word_tag_vectorizers.append(cls(**params).train(**train_params))
+    setattr(tagger, "word_tag_vectorizers", word_tag_vectorizers)
     # модель
     tagger.build()
     # model_file is relative to json file directory
-    model_file = os.path.join(os.path.dirname(infile), json_data['dump_file'])
-    tagger.model_.load_weights(model_file)
+    model_file = [os.path.join(os.path.dirname(infile), filename) for filename in json_data['dump_file']]
+    for curr_model_file, model in zip(model_file,  tagger.models_):
+        model.load_weights(curr_model_file)
+    
     return tagger
 
 
@@ -137,20 +144,22 @@ class CharacterTagger:
     batch_params = training_parameter("batch_params")
     batching_probs_ = training_parameter('batching_probs_')
 
-    def __init__(self, reverse=False, use_lm_loss=False, use_lm=False,
+    def __init__(self, models_number=1, reverse=False,
+                 allow_multiple_labels=False, use_lm_loss=False, use_lm=False,
                  morpho_dict=None, morpho_dict_params=None,
                  morpho_dict_embeddings_size=256, word_vectorizers=None,
-                 word_tag_vectorizers=None,
+                 word_tag_vectorizers=None, embed_additional_features=False,
                  additional_inputs_number=0, additional_inputs_weight=0,
                  use_additional_symbol_features=False,
                  normalize_lm_embeddings=False, base_model_weight=0.25,
-                 word_rnn = "cnn", min_char_count=1, char_embeddings_size=16,
-                 char_conv_layers = 1, char_window_size = 5, char_filters = None,
+                 word_rnn = "cnn", min_char_count=1, min_tag_count=1,
+                 char_embeddings_size=16, char_conv_layers = 1,
+                 char_window_size = 5, char_filters = None,
                  total_char_filters=None, char_filter_multiple=25, max_window_filters=200,
                  char_highway_layers = 1, conv_dropout = 0.0, highway_dropout = 0.0,
                  intermediate_dropout = 0.0, word_dropout=0.0, lm_dropout=0.0,
                  word_lstm_layers=1, word_lstm_units=128, lstm_dropout = 0.0,
-                 decompose_labels=False, use_nearest_neighbours=False,
+                 special_tags=None, decompose_labels=False, use_nearest_neighbours=False,
                  use_rnn_for_weight_state=False, weight_state_rnn_units=64,
                  use_fusion=False, fusion_state_units=256, use_dimension_bias=False,
                  use_intermediate_activation_for_weights=False,
@@ -158,15 +167,20 @@ class CharacterTagger:
                  use_leader_loss=False, leader_loss_weight=0.2,
                  regularizer=None, fusion_regularizer=None,
                  probs_threshold=None, lm_probs_threshold=None,
-                 min_prob=0.01, max_diff=2.0, to_weigh_loss=True,
+                 to_substitute_words=False, substitution_prob=0.1,
+                 min_prob=0.01, max_diff=2.0, multiple_label_threshold=1.0,
+                 to_weigh_loss=True,
                  callbacks=None, verbose=1, random_state=189):
+        self.models_number = models_number
         self.reverse = reverse
+        self.allow_multiple_labels = allow_multiple_labels
         self.use_lm_loss = use_lm_loss
         self.use_lm = use_lm
         self.morpho_dict = morpho_dict
         self.morpho_dict_params = morpho_dict_params
         self.morpho_dict_embeddings_size = morpho_dict_embeddings_size
         self.word_vectorizers = word_vectorizers
+        self.embed_additional_features = embed_additional_features
         self.word_tag_vectorizers = word_tag_vectorizers
         self.additional_inputs_number = additional_inputs_number
         self.additional_inputs_weight = additional_inputs_weight
@@ -175,6 +189,7 @@ class CharacterTagger:
         self.base_model_weight = base_model_weight
         self.word_rnn = word_rnn
         self.min_char_count = min_char_count
+        self.min_tag_count = min_tag_count
         self.char_embeddings_size = char_embeddings_size
         self.char_conv_layers = char_conv_layers
         self.char_window_size = char_window_size
@@ -189,6 +204,7 @@ class CharacterTagger:
         self.word_dropout = word_dropout
         self.word_lstm_layers = word_lstm_layers
         self.word_lstm_units = word_lstm_units
+        self.special_tags = special_tags
         self.decompose_labels = decompose_labels
         self.use_nearest_neighbours = use_nearest_neighbours
         self.lstm_dropout = lstm_dropout
@@ -206,8 +222,11 @@ class CharacterTagger:
         self.fusion_regularizer = fusion_regularizer
         self.probs_threshold = probs_threshold
         self.lm_probs_threshold = lm_probs_threshold
+        self.to_substitute_words = to_substitute_words
+        self.substitution_prob = substitution_prob
         self.min_prob = min_prob
         self.max_diff = max_diff
+        self.multiple_label_threshold = multiple_label_threshold
         self.to_weigh_loss = to_weigh_loss
         self.callbacks = callbacks
         self.verbose = verbose
@@ -252,6 +271,17 @@ class CharacterTagger:
         if self.fusion_regularizer is not None:
             self.fusion_regularizer = kreg.l2(self.fusion_regularizer)
         np.random.seed(self.random_state)
+
+    def _make_model_file(self, model_file):
+        answer = []
+        if model_file is not None:
+            if isinstance(model_file, str):
+                splitted = model_file.rsplit(".", maxsplit=1)
+                if len(splitted) == 1:
+                    answer = ["{}-{}".format(model_file, i+1) for i in range(self.models_number)]
+                else:
+                    answer = ["{}-{}.{}".format(splitted[0], i + 1, splitted[1]) for i in range(self.models_number)]
+        return answer
 
     def _make_batch_params_dict(self, params, code):
         default_values_batch = {"first_epoch": 1, "last_epoch": self.nepochs, "decay_epoch": self.nepochs+1,
@@ -319,7 +349,7 @@ class CharacterTagger:
         return
 
     def to_json(self, outfile, model_file, lm_file=None, dictionary_file=None):
-        model_file = os.path.relpath(model_file, os.path.dirname(outfile))
+        rel_model_file = [os.path.relpath(x, os.path.dirname(outfile)) for x in model_file]
         info = dict()
         if lm_file is not None:
             info["lm_file"] = lm_file
@@ -330,8 +360,8 @@ class CharacterTagger:
                     isinstance(val, DecomposingVocabulary) or
                     attr.isupper() or isinstance(val, kb.Function) or
                     attr in ["callbacks", "_compile_args", "batching_probs_", "train_params_",
-                             "model_", "_basic_model_", "warmup_model_",
-                             "_decoder_", "lm_",
+                             "models_", "basic_models_", "warmup_model_",
+                             "decoders_", "lm_",
                              "morpho_dict_indexes_func_", "word_tag_mapper_", "morpho_dict_",
                              "regularizer", "fusion_regularizer",
                              "word_vectorizers", "word_tag_vectorizers"]):
@@ -341,10 +371,13 @@ class CharacterTagger:
             elif isinstance(val, np.ndarray):
                 val = val.tolist()
                 info[attr] = val
-            elif attr == "model_":
-                info["dump_file"] = model_file
-                self.model_.save_weights(model_file)
+            elif attr == "models_":
+                info["dump_file"] = rel_model_file
+                for curr_model_file, model in zip(model_file, self.models_):
+                    model.save_weights(curr_model_file)
             elif attr == "callbacks":
+                if val is None:
+                    val = []
                 for callback in val:
                     if isinstance(callback, EarlyStopping):
                         info["early_stopping_callback"] = {"patience": callback.patience,
@@ -515,12 +548,15 @@ class CharacterTagger:
                     for j, word in enumerate(sent):
                         word = decode_word(word)
                         if word is not None:
-                            word_tags = vectorizer[word]
+                            try:
+                                word_tags = vectorizer[word]
+                            except:
+                                word_tags = vectorizer(word)
                             word_indexes = [self.tags_.toidx(tag) for tag in word_tags]
                             word_indexes = [x for x in word_indexes if x != UNKNOWN]
                             if len(word_indexes) > 0:
-                                # curr_sent_tags[j, word_indexes] += 1 / np.log2(len(word_indexes) + 1)
-                                curr_sent_tags[j, word_indexes] += 1 / len(word_indexes)
+                                curr_sent_tags[j, word_indexes] += 1 / np.log2(len(word_indexes) + 1)
+                                # curr_sent_tags[j, word_indexes] += 1 / len(word_indexes)
                     X[index].insert(insert_pos, curr_sent_tags)
             # if self.morpho_dict is not None:
             #     if hasattr(self, "lm_") and labels is not None:
@@ -577,7 +613,7 @@ class CharacterTagger:
         if bucket_length is None:
             bucket_length = m
         # answer = np.zeros(shape=(bucket_length,), dtype=np.int32)
-        if self.decompose_labels:
+        if self.decompose_labels or self.allow_multiple_labels:
             answer = np.zeros(shape=(bucket_length, self.outputs_number), dtype=int)
         else:
             answer = [0] * bucket_length
@@ -585,9 +621,33 @@ class CharacterTagger:
             answer[i] = self.tags_.toidx(tag) if func is None else func(tag)
         return answer
 
+    def _make_tag_substitution_data(self, data, labels, words_to_substitute):
+        self.words_to_substitute_ = [[] for _ in range(self.tags_.symbols_number_)]
+        for word, tag in words_to_substitute:
+            tag_index = self.tags_.get_symbol_code(tag)
+            if tag_index != UNKNOWN:
+                word = [BEGIN] + [self.symbols_.toidx(x) for x in word] + [END]
+                self.words_to_substitute_[tag_index].append(word)
+        words_by_labels = defaultdict(lambda: defaultdict(int))
+        for sent, labels in zip(data, labels):
+            for word, label in zip(sent, labels):
+                label = self.tags_.get_symbol_code(label)
+                if label != UNKNOWN:
+                    word = decode_word(word)
+                    words_by_labels[label][word] += 1
+        self.substitution_probs_for_tags_ = [0] * self.tags_number_
+        for index in range(self.tags_number_):
+            curr_words_data = words_by_labels.get(index, dict())
+            if len(self.words_to_substitute_[index]) == 0 or len(curr_words_data) == 0:
+                continue
+            alpha = len(curr_words_data) / (sum(curr_words_data.values()) + len(curr_words_data))
+            self.substitution_probs_for_tags_[index] = self.substitution_prob * alpha
+        return 0
+
     def train(self, data, labels, dev_data=None, dev_labels=None,
               additional_data=None, additional_labels=None,
               train_params=None, to_build=True,
+              words_to_substitute=None,
               symbol_vocabulary_file=None, tags_vocabulary_file=None,
               lm_file=None, model_file=None, save_file=None):
         """
@@ -612,7 +672,8 @@ class CharacterTagger:
         else:
             self.symbols_ = vocabulary_from_json(symbol_vocabulary_file, use_features=False)
         if tags_vocabulary_file is None:
-            cls = DecomposingVocabulary() if self.decompose_labels else FeatureVocabulary(character=False)
+            vocab = DecomposingVocabulary if self.decompose_labels else FeatureVocabulary
+            cls = vocab(character=False, min_count=self.min_tag_count, special_tokens=self.special_tags)
             self.tags_ = cls.train(labels_for_vocab)
         else:
             with open(tags_vocabulary_file, "r", encoding="utf8") as fin:
@@ -640,6 +701,8 @@ class CharacterTagger:
             data, dev_data = [data[i] for i in train_indexes], [data[i] for i in dev_indexes]
             labels, dev_labels = [labels[i] for i in train_indexes], [labels[i] for i in dev_indexes]
         dataset_codes = [0] * len(data)
+        if self.to_substitute_words:
+            self._make_tag_substitution_data(data, labels, words_to_substitute)
         if self.additional_inputs_number > 0 and additional_data is not None:
             for code, (add_dataset, add_labels) in enumerate(zip(additional_data, additional_labels), 1):
                 data += add_dataset
@@ -657,6 +720,7 @@ class CharacterTagger:
         if save_file is not None and model_file is not None:
             # if model_file is not None:
             #     model_file = os.path.relpath(model_file, os.path.dirname(save_file))
+            model_file = self._make_model_file(model_file)
             self.to_json(save_file, model_file, lm_file)
         self._train_on_data(X_train, indexes_by_buckets, X_dev,
                             dev_indexes_by_buckets, dataset_codes=dataset_codes,
@@ -707,69 +771,95 @@ class CharacterTagger:
         #         train_gen, steps_per_epoch=train_steps, epochs=self.n_warmup_epochs,
         #         callbacks=self.callbacks, validation_data=dev_gen,
         #         validation_steps=dev_steps, verbose=1)
-        if model_file is not None:
-            monitor = ("val_multioutput_acc" if self.decompose_labels else
-                       "val_p_output_acc" if self.use_lm else
-                       "val_acc")
-            callback = ModelCheckpoint(model_file, monitor=monitor,
-                                       save_weights_only=True, save_best_only=True)
-            if self.callbacks is not None:
-                self.callbacks.append(callback)
-            else:
-                self.callbacks = [callback]
+
         # are_train_buckets_active = self._make_active_buckets(train_dataset_codes_by_buckets)
         # are_dev_buckets_active = self._make_active_buckets(dev_dataset_codes_by_buckets)
-        for t in range(self.nepochs):
-            if t == self.transfer_warmup_epochs and self.freeze_after_transfer:
-                self._freeze_output_network()
-            train_steps, dev_steps = 0, 0
-            curr_train_indexes, curr_dev_indexes = [], []
-            for i, code in enumerate(train_dataset_codes_by_buckets):
-                bucket_prob = self.batching_probs_[code, t]
-                if bucket_prob == 0.0:
-                    continue
-                sampling_prob = np.random.binomial(1, bucket_prob, len(train_indexes_by_buckets[i]))
-                curr_bucket_indexes = [train_indexes_by_buckets[i][j] for j in sampling_prob.nonzero()[0]]
-                curr_train_indexes.append(curr_bucket_indexes)
-                train_steps += (len(curr_bucket_indexes) - 1) // self.batch_size + 1
-            for i, code in enumerate(dev_dataset_codes_by_buckets):
-                if self.transfer_warmup_epochs > 0:
-                    if int(t >= self.transfer_warmup_epochs) != int(code == 0):
+        monitor = ("val_multioutput_acc" if self.decompose_labels else
+                   "val_ambigious_accuracy" if self.allow_multiple_labels else
+                   "val_p_output_acc" if self.use_lm else
+                   "val_acc")
+        for m, model in enumerate(self.models_):
+            callbacks = self.callbacks[:] if self.callbacks is not None else []
+            if model_file is not None:
+                callback = ModelCheckpoint(model_file[m], monitor=monitor,
+                                           save_weights_only=True, save_best_only=True)
+                callbacks.append(callback)
+            for callback in callbacks:
+                if isinstance(callback, EarlyStopping):
+                    callback.monitor = monitor
+                    callback.wait = 0
+                    callback.best = -np.inf
+            for t in range(self.nepochs):
+                if t == self.transfer_warmup_epochs and self.freeze_after_transfer:
+                    self._freeze_output_network(model)
+                X_train = X[:]
+                if self.to_substitute_words:
+                    X_train = self._substitute_words(X_train)
+                train_steps, dev_steps = 0, 0
+                curr_train_indexes, curr_dev_indexes = [], []
+                for i, code in enumerate(train_dataset_codes_by_buckets):
+                    bucket_prob = self.batching_probs_[code, t]
+                    if bucket_prob == 0.0:
                         continue
-                elif self.batching_probs_[code, t] == 0.0:
-                    continue
-                curr_dev_indexes.append(dev_indexes_by_buckets[i])
-                dev_steps += (len(dev_indexes_by_buckets[i]) - 1) // self.batch_size + 1
-            train_gen = DataGenerator(X, curr_train_indexes, self.tags_number_,
-                                      batch_size=self.batch_size, duplicate_answer=self.use_lm,
-                                      answers_number=self.outputs_number,
-                                      fields_to_one_hot={0: self.symbols_number_},
-                                      yield_weights=self.to_weigh_loss, weights=weights)
-            if dev_steps > 0:
-                dev_gen = DataGenerator(X_dev, curr_dev_indexes, self.tags_number_,
-                                        batch_size=self.batch_size, shuffle=False,
-                                        answers_number=self.outputs_number,
-                                        duplicate_answer=self.use_lm,
-                                        fields_to_one_hot={0: self.symbols_number_},
-                                        yield_weights=self.to_weigh_loss)
-            else:
-                dev_gen = None
-            for callback in self.callbacks:
-                if isinstance(callback, ModelCheckpoint):
-                    callback.save_best_only = (dev_steps > 0)
-            # TO_DO: set callback values
-            # for callback in self.callbacks:
-            #     if isinstance(callback, MultirunEarlyStopping):
-            self.model_.fit_generator(
-                train_gen, steps_per_epoch=train_steps, epochs=t+1,
-                callbacks=self.callbacks, validation_data=dev_gen,
-                validation_steps=dev_steps, initial_epoch=t, verbose=1)
-            if self.model_.stop_training:
-                break
+                    sampling_prob = np.random.binomial(1, bucket_prob, len(train_indexes_by_buckets[i]))
+                    curr_bucket_indexes = [train_indexes_by_buckets[i][j] for j in sampling_prob.nonzero()[0]]
+                    curr_train_indexes.append(curr_bucket_indexes)
+                    train_steps += (len(curr_bucket_indexes) - 1) // self.batch_size + 1
+                for i, code in enumerate(dev_dataset_codes_by_buckets):
+                    if self.transfer_warmup_epochs > 0:
+                        if int(t >= self.transfer_warmup_epochs) != int(code == 0):
+                            continue
+                    elif self.batching_probs_[code, t] == 0.0:
+                        continue
+                    curr_dev_indexes.append(dev_indexes_by_buckets[i])
+                    dev_steps += (len(dev_indexes_by_buckets[i]) - 1) // self.batch_size + 1
+                train_gen = DataGenerator(X_train, curr_train_indexes, self.tags_number_,
+                                          batch_size=self.batch_size, duplicate_answer=self.use_lm,
+                                          answers_number=self.outputs_number,
+                                          fields_to_one_hot={0: self.symbols_number_},
+                                          has_multiple_labels=self.allow_multiple_labels,
+                                          yield_weights=self.to_weigh_loss, weights=weights)
+                if dev_steps > 0:
+                    dev_gen = DataGenerator(X_dev, curr_dev_indexes, self.tags_number_,
+                                            batch_size=self.batch_size, shuffle=False,
+                                            answers_number=self.outputs_number,
+                                            duplicate_answer=self.use_lm,
+                                            fields_to_one_hot={0: self.symbols_number_},
+                                            has_multiple_labels=self.allow_multiple_labels,
+                                            yield_weights=self.to_weigh_loss)
+                else:
+                    dev_gen = None
+                for callback in callbacks:
+                    if isinstance(callback, ModelCheckpoint):
+                        callback.save_best_only = (dev_steps > 0)
+                # TO_DO: set callback values
+                # for callback in self.callbacks:
+                #     if isinstance(callback, MultirunEarlyStopping):
+                model.fit_generator(
+                    train_gen, steps_per_epoch=train_steps, epochs=t+1,
+                    callbacks=callbacks, validation_data=dev_gen,
+                    validation_steps=dev_steps, initial_epoch=t, verbose=1)
+                if model.stop_training:
+                    break
 
-        if model_file is not None:
-            self.model_.load_weights(model_file)
+            if model_file is not None:
+                model.load_weights(model_file[m])
         return self
+
+    def _substitute_words(self, data):
+        for sent, labels in data:
+            L = np.count_nonzero(labels)
+            curr_substitution_probs = np.random.uniform(size=L)
+            for i, prob in enumerate(curr_substitution_probs):
+                label = labels[i]
+                tag_substitution_prob = self.substitution_probs_for_tags_[label]
+                if tag_substitution_prob >= prob:
+                    curr_words = self.words_to_substitute_[label]
+                    index = np.random.choice(np.arange(len(curr_words)))
+                    word = curr_words[index]
+                    if len(word) < MAX_WORD_LENGTH:
+                        sent[i][:len(word)] = word
+        return data
 
     def _make_batching_probs(self):
         batching_probs = np.zeros(shape=(self.additional_inputs_number+1, self.nepochs), dtype=float)
@@ -827,16 +917,27 @@ class CharacterTagger:
                 if predict_with_basic:
                     bucket_probs = bucket_basic_probs
             else:
-                bucket_probs = self.model_.predict(X_curr, batch_size=64)
+                bucket_probs = [model.predict(X_curr, batch_size=64) for model in self.models_]
                 bucket_basic_probs = [None] * len(bucket_indexes)
-                if isinstance(bucket_probs, list):
-                    bucket_probs, bucket_basic_probs = bucket_probs
+                if isinstance(bucket_probs[0], list):
+                    bucket_probs, bucket_basic_probs = map(list, zip(*bucket_probs))
+                    bucket_basic_probs = np.mean(bucket_probs, axis=1)
+                bucket_probs = np.mean(bucket_probs, axis=0)
                 if self.decompose_labels:
                     slice_bounds = [0] + list(np.cumsum(self.tags_number_))
                     bucket_prob_slices = [bucket_probs[...,start:end]
                                           for start, end in zip(slice_bounds[:-1], slice_bounds[1:])]
                     bucket_labels = [np.argmax(elem, axis=-1) for elem in bucket_prob_slices]
                     bucket_labels = np.transpose(bucket_labels, [1,2,0])
+                elif self.allow_multiple_labels:
+                    bucket_probs[..., UNKNOWN] = 0.0
+                    threshold = np.max(bucket_probs, axis=-1) * self.multiple_label_threshold
+                    threshold = np.expand_dims(threshold, axis=-1)
+                    are_probs_large = (bucket_probs > threshold)
+                    bucket_labels = []
+                    for are_sent_probs_large in are_probs_large:
+                        curr_bucket_labels = [np.nonzero(x)[0] for x in are_sent_probs_large]
+                        bucket_labels.append(curr_bucket_labels)
                 else:
                     bucket_labels = np.argmax(bucket_probs, axis=-1)
             for curr_labels, curr_probs, curr_basic_probs, index in\
@@ -857,11 +958,14 @@ class CharacterTagger:
             X_curr = [np.array([X_test[i][j] for i in bucket_indexes])
                       for j in range(len(X_test[0])-1)]
             y_curr = [np.array(X_test[i][-1]) for i in bucket_indexes]
-            bucket_probs = self.model_.predict(X_curr, batch_size=256)
+            bucket_probs = [model.predict(X_curr, batch_size=256) for model in self.models_]
             if self.use_lm:
-                bucket_probs, bucket_basic_probs = bucket_probs
+                bucket_basic_probs = [elem[1] for elem in bucket_probs]
+                bucket_probs = [elem[0] for elem in bucket_probs]
+                bucket_basic_probs = np.mean(bucket_basic_probs, axis=0)
             else:
                 bucket_basic_probs = [None] * len(bucket_indexes)
+            bucket_probs = np.mean(bucket_probs, axis=0)
             for curr_labels, curr_probs, curr_basic_probs, index in\
                     zip(y_curr, bucket_probs, bucket_basic_probs, bucket_indexes):
                 L = len(data[index])
@@ -987,6 +1091,18 @@ class CharacterTagger:
         return self
 
     def build(self):
+        self.models_ = [None] * self.models_number
+        if self.use_lm:
+            self.basic_models_ = [None] * self.models_number
+            self.decoders_ = [None] * self.models_number
+        for i in range(self.models_number):
+            model, basic_model, decoder = self._build_model()
+            self.models_[i] = model
+            if self.use_lm:
+                self.basic_models_[i], self.decoders_[i] = basic_model, decoder
+        return self
+
+    def _build_model(self):
         # word_inputs = kl.Input(shape=(None, MAX_WORD_LENGTH+2), dtype="int32")
         word_inputs = kl.Input(shape=(None, MAX_WORD_LENGTH+2, self.symbols_number_), dtype="int32")
         inputs, basic_inputs = [word_inputs], [word_inputs]
@@ -1013,9 +1129,13 @@ class CharacterTagger:
         basic_inputs.extend(additional_word_tag_inputs)
         pre_outputs, states = self._build_basic_network(word_outputs, additional_word_tag_inputs)
         loss = (multioutput_categorical_crossentropy if self.decompose_labels else
+                AmbigiousCategoricalEntropy(unknown_index=UNKNOWN, start_index=4,
+                                            classes_number=self.tags_number_) if self.allow_multiple_labels else
                 leader_loss(self.leader_loss_weight) if self.use_leader_loss else
                 "categorical_crossentropy")
-        metric = MultioutputAccuracy(self.tags_number_) if self.decompose_labels else "accuracy"
+        metric = (MultioutputAccuracy(self.tags_number_) if self.decompose_labels else
+                  AmbigiousAccuracy(UNKNOWN) if self.allow_multiple_labels else
+                  "accuracy")
         compile_args = {"optimizer": ko.nadam(clipnorm=5.0), "loss": loss, "metrics": [metric]}
         if hasattr(self, "lm_"):
             position_inputs = kl.Lambda(positions_func)(word_inputs)
@@ -1052,15 +1172,17 @@ class CharacterTagger:
         else:
             outputs = pre_outputs
         self._compile_args = compile_args
-        self.model_ = Model(inputs, outputs)
-        self.model_.compile(**compile_args)
-        self._embedder_ = kb.Function(basic_inputs + [kb.learning_phase()], [word_outputs, states])
+        model = Model(inputs, outputs)
+        model.compile(**compile_args)
+        # self._embedder_ = kb.Function(basic_inputs + [kb.learning_phase()], [word_outputs, states])
         if hasattr(self, "lm_"):
-            self._basic_model_ = kb.Function(basic_inputs + [kb.learning_phase()], decoder_inputs[:3])
-            self._decoder_ = kb.Function(decoder_inputs + [kb.learning_phase()], [final_outputs])
-        if self.verbose > 0:
-            print(self.model_.summary())
-        return self
+            basic_model = kb.Function(basic_inputs + [kb.learning_phase()], decoder_inputs[:3])
+            decoder = kb.Function(decoder_inputs + [kb.learning_phase()], [final_outputs])
+        else:
+            basic_model, decoder = None, None
+        # if self.verbose > 0:
+        #     print(self.model_.summary())
+        return model, basic_model, decoder
 
     def _build_word_cnn(self, inputs):
         # inputs = kl.Lambda(kb.one_hot, arguments={"num_classes": self.symbols_number_},
@@ -1119,10 +1241,21 @@ class CharacterTagger:
             pre_outputs = self.tag_embeddings_output_layer(lstm_outputs)
         else:
             if len(self.word_tag_vectorizers) > 0:
-                pre_outputs = kl.TimeDistributed(kl.Dense(self.tags_number_))(lstm_outputs)
-                for elem in additional_embeddings:
-                    pre_outputs = WeightedSum()([pre_outputs, elem])
-                pre_outputs = kl.TimeDistributed(kl.Activation(activation="softmax"), name="p")(pre_outputs)
+                # pre_outputs = kl.TimeDistributed(kl.Dense(self.tags_number_))(lstm_outputs)
+                # for elem in additional_embeddings:
+                #     pre_outputs = WeightedSum()([pre_outputs, elem])
+                to_concatenate = [lstm_outputs]
+                for embedding in additional_embeddings:
+                    if self.embed_additional_features:
+                        embedding = kl.Dense(self.tags_number_, kernel_initializer=kint.identity(),
+                                              bias_initializer="zeros")(embedding)
+                        embedding = kl.Dropout(0.2)(embedding)
+                    to_concatenate.append(embedding)
+                pre_outputs = kl.Concatenate()(to_concatenate)
+                # pre_outputs = kl.TimeDistributed(kl.Activation(activation="softmax"), name="p")(pre_outputs)
+                output_layer = kl.Dense(self.tags_number_, activation="softmax",
+                                        activity_regularizer=self.regularizer)
+                pre_outputs = kl.TimeDistributed(output_layer, name="p")(pre_outputs)
                 if self.regularizer is not None:
                     pre_outputs = kl.ActivityRegularization(l2=self.regularizer.l2)(pre_outputs)
             else:
@@ -1145,11 +1278,11 @@ class CharacterTagger:
                         pre_outputs = kl.TimeDistributed(output_layer, name="p")(lstm_outputs)
         return pre_outputs, lstm_outputs
 
-    def _freeze_output_network(self):
-        for layer in self.model_.layers:
+    def _freeze_output_network(self, model):
+        for layer in model.layers:
             if layer.name.startswith("word_lstm") or layer.name == "p":
                 layer.trainable = False
-        self.model_.compile(**self._compile_args)
+        model.compile(**self._compile_args)
         return
 
     def tag_embeddings_output_layer(self, lstm_outputs):
@@ -1162,6 +1295,11 @@ class CharacterTagger:
         scores = kl.TimeDistributed(score_layer)(outputs_embeddings)
         probs = kl.TimeDistributed(kl.Activation("softmax"), name="p")(scores)
         return probs
+
+    def _make_class_matrix(self):
+        matrix = np.identity(n=self.tags_number_)
+        matrix[len(AUXILIARY):,UNKNOWN] = 1
+        return matrix
 
 def extend_history(histories, hyps, indexes, start=0, pos=None,
                    history_pos=0, value=None, func="append", **kwargs):

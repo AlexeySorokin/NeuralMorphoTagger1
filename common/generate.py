@@ -1,8 +1,37 @@
+import itertools
 import sys
-import numpy as np
 
-from neural_LM.common import make_batch, PAD, to_one_hot
-from keras.callbacks import EarlyStopping
+import numpy as np
+from keras.callbacks import Callback, EarlyStopping
+
+from neural_LM.common import PAD, to_one_hot
+
+
+class CustomCallback(Callback):
+
+    def __init__(self):
+        super(CustomCallback, self).__init__()
+
+    def on_train_begin(self, logs=None):
+        self.verbose = self.params['verbose']
+        self.epochs = self.params['epochs']
+        self.train_losses = []
+        self.val_losses = []
+        self.best_loss = np.inf
+
+    def on_epoch_begin(self, epoch, logs=None):
+        print('Epoch %d/%d' % (epoch + 1, self.epochs))
+
+    def on_epoch_end(self, epoch, logs=None):
+        self.train_losses.append(logs["loss"])
+        self.val_losses.append(logs["val_loss"])
+        print("loss: {:.4f}, val_loss: {:.4f}".format(self.train_losses[-1], self.val_losses[-1]))
+        if self.val_losses[-1] < self.best_loss:
+            self.best_loss = self.val_losses[-1]
+            print(", best loss\n")
+        else:
+            print("\n")
+
 
 class MultirunEarlyStopping(EarlyStopping):
 
@@ -14,6 +43,30 @@ class MultirunEarlyStopping(EarlyStopping):
         self.best = best
 
 
+def _make_many_hot_array(data, classes_number):
+    flat_data, shape = np.ravel(data), np.shape(data)
+    if flat_data.dtype != "object":
+        flat_data = np.reshape(flat_data, (-1, 1))
+        shape = shape[:-1]
+    answer = np.zeros(shape=(len(flat_data), classes_number), dtype=np.int32)
+    for i, elem in enumerate(flat_data):
+        answer[i, elem] = 1
+    answer = answer.reshape(shape + (-1,))
+    return answer
+
+
+def make_batch(data, fields_to_one_hot=None):
+    if fields_to_one_hot is None:
+        fields_to_one_hot = dict()
+    fields_number = len(data[0])
+    answer = [None] * fields_number
+    for k in range(fields_number):
+        if k in fields_to_one_hot:
+            answer[k] = _make_many_hot_array([elem[k] for elem in data], fields_to_one_hot[k])
+        else:
+            answer[k] = np.array([elem[k] for elem in data])
+    return answer
+
 class DataGenerator:
 
     def __init__(self, X, indexes_by_buckets, output_symbols_number,
@@ -21,6 +74,7 @@ class DataGenerator:
                  use_last=False, has_answer=True, shift_answer=False,
                  duplicate_answer=False, answers_number=1,
                  fields_number=None, fields_to_one_hot=None,
+                 has_multiple_labels=False,
                  shuffle=True, weights=None, yield_weights=True):
         self.X = X
         self.indexes_by_buckets = indexes_by_buckets
@@ -33,6 +87,7 @@ class DataGenerator:
         self.duplicate_answer = duplicate_answer
         self.answers_number = answers_number
         self.fields_to_one_hot = dict(fields_to_one_hot or [])
+        self.has_multiple_labels = has_multiple_labels
         self.shuffle = shuffle
         self.weights = weights if weights is not None else np.ones(shape=(len(X)), dtype=float)
         self.yield_weights = yield_weights
@@ -106,14 +161,17 @@ class DataGenerator:
             y_to_yield = np.concatenate(y_to_yield, axis=-1)
         else:
             y_to_yield = to_one_hot(labels, self.output_symbols_number)
+            if self.has_multiple_labels:
+                y_to_yield = np.max(y_to_yield, axis=-2)
         if self.duplicate_answer:
             y_to_yield = [y_to_yield, y_to_yield]
         return y_to_yield
 
     def _make_weights(self, labels, weights):
-        if self.has_multiple_outputs:
-            labels = labels[0]
-        weights_to_yield = np.ones_like(labels[:,0], dtype=np.float32) * weights
+        weights_to_yield = np.ones_like(labels[:,0], dtype=np.float32)
+        if np.ndim(weights_to_yield) == 2:
+            weights_to_yield = weights_to_yield[:,0]
+        weights_to_yield *= weights
         if self.yield_weights and self.total_array_size > 0:
             # the fraction of current batch in the whole data
             weights_to_yield *= self.total_data_length * labels.shape[1] / self.total_array_size
@@ -155,3 +213,65 @@ class DataGenerator:
 
     def __iter__(self):
         return self
+
+
+def generate_data(X, indexes_by_buckets, output_symbols_number,
+                  batch_size=None, epochs=None, active_buckets=None,
+                  use_last=True, has_answer=True,
+                  shift_answer=False, shuffle=True, yield_weights=True,
+                  duplicate_answer=False, fields_number=None,
+                  fields_to_one_hot=None, weights=None):
+    if weights is None:
+        weights = np.ones(shape=(len(X)))
+    if fields_number is None:
+        fields_number = len(X[0]) - int(has_answer and not use_last)
+    if fields_to_one_hot is None:
+        fields_to_one_hot = dict()
+    fields_to_one_hot = dict(fields_to_one_hot)
+    answer_index = 0 if use_last else -1 if has_answer else None
+    if batch_size is None:
+        batches_indexes = [(i, 0) for i in range(len(indexes_by_buckets))]
+    else:
+        batches_indexes = list(itertools.chain.from_iterable(
+            (((i, j) for j in range(0, len(bucket), batch_size))
+             for i, bucket in enumerate(indexes_by_buckets))))
+    total_arrays_size = sum(np.count_nonzero(X[j][answer_index] != PAD) - 1
+                            for elem in indexes_by_buckets for j in elem)
+    total_data_length = sum(len(elem) for elem in indexes_by_buckets)
+    curr_epoch = 0
+    if epochs is None:
+        epochs = np.inf
+    count = 0
+    while True:
+        if shuffle:
+            for elem in indexes_by_buckets:
+                np.random.shuffle(elem)
+            np.random.shuffle(batches_indexes)
+        curr_epoch += 1
+        for i, start in batches_indexes:
+            if active_buckets is not None and not active_buckets[i, curr_epoch]:
+                continue
+            bucket_size = len(indexes_by_buckets[i])
+            end = min(bucket_size, start + batch_size) if batch_size is not None else bucket_size
+            bucket_indexes = indexes_by_buckets[i][start:end]
+            # TO DO: fix one-hot generation of data
+            to_yield = make_batch([X[j][:fields_number] for j in bucket_indexes], fields_to_one_hot)
+            count += 1
+            if has_answer:
+                indexes_to_yield = np.array([X[j][answer_index] for j in bucket_indexes])
+                if shift_answer:
+                    padding = np.full(shape=(end - start, 1), fill_value=PAD)
+                    indexes_to_yield = np.hstack((indexes_to_yield[:,1:], padding))
+                # y_to_yield = to_one_hot(indexes_to_yield, output_symbols_number)
+                y_to_yield = to_one_hot(indexes_to_yield, output_symbols_number)
+                weights_to_yield = np.ones(shape=(end - start,), dtype=np.float32)
+                weights_to_yield *= weights[bucket_indexes]
+                if yield_weights:
+                    weights_to_yield *= total_data_length * indexes_to_yield.shape[1]
+                    weights_to_yield /= total_arrays_size
+                if duplicate_answer:
+                    y_to_yield = [y_to_yield, y_to_yield]
+                    weights_to_yield = [weights_to_yield, weights_to_yield]
+                yield (to_yield, y_to_yield, weights_to_yield)
+            else:
+                yield to_yield

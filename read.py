@@ -2,6 +2,16 @@ from collections import defaultdict
 from collections.__init__ import defaultdict
 
 
+def read_substitution_file(infile):
+    answer = []
+    with open(infile, "r", encoding="utf8") as fin:
+        for line in fin:
+            line = line.strip()
+            if line == "":
+                continue
+            answer.append(line.split("\t")[-2:])
+    return answer
+
 def read_unimorph_infile(infiles, by_lemmas=False, to_list=False,
                          forms_to_add=None, pos_mapper=None):
     if isinstance(infiles, str):
