@@ -3,10 +3,6 @@ import os
 import json
 
 import numpy as np
-# stderr = sys.stderr
-# sys.stderr = open(os.devnull, 'w')
-# import keras
-# sys.stderr = stderr
 from keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
 from neural_LM.neural_LM import NeuralLM, read_input, load_lm
