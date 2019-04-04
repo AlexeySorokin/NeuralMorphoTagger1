@@ -1,0 +1,33 @@
+{
+	"to_train": true,
+    "train_files": ["/home/alexeysorokin/data/Data/UD2.3/UD_Serbian-SET/sr_set-ud-train.conllu"],
+    "dev_files": ["/home/alexeysorokin/data/Data/UD2.3/UD_Serbian-SET/sr_set-ud-dev.conllu"],
+    "test_files": ["/home/alexeysorokin/data/Data/UD2.3/UD_Serbian-SET/sr_set-ud-test.conllu"],
+    "additional_train_files": [["/home/alexeysorokin/data/Data/UD2.3/UD_Russian-SynTagRus/ru_syntagrus-ud-train.conllu", 1]],
+    "save_file": "neural_tagging/models/work/srru-e1-rus.json",
+    "model_file": "neural_tagging/models/work/srru-e1-rus.hdf5",
+    "load_file": "neural_tagging/models/work/srru-e1-rus.json",
+    "model_params": {
+        "additional_inputs_number": 1, "additional_inputs_weight": 1.0,
+        "use_additional_symbol_features": true,
+        "use_lm_loss": false, "use_lm": false, "normalize_lm_embeddings": false,
+        "min_char_count": 3, "char_embeddings_size": 32, "char_window_size": [1, 2, 3, 4, 5, 6, 7],
+        "word_lstm_units": 128,
+        "conv_dropout": 0.0, "char_conv_layers": 1,
+        "char_highway_layers": 1, "highway_dropout": 0.0, "word_lstm_layers": 1,
+        "char_filter_multiple": 50, "intermediate_dropout": 0.0, "word_dropout": 0.2, "lstm_dropout": 0.2,
+        "regularizer": 0.01, "lm_dropout": 0.2
+    },
+    "train_params": {
+        "nepochs": 50, "freeze_after_transfer": false,
+        "batch_params": {
+            "0": {"first_epoch": 2}, "1": {"decay_epoch": 2, "decay": 0.2}}
+    },
+    "normalizer_params": {"use_most_frequent_value": false, "max_error": 1},
+    "tag_normalizer_save_file": "neural_tagging/models/tag_normalizers/srruuk.json",
+    "tag_normalizer_mapping_file": "neural_tagging/models/tag_normalizers/srruuk-mapping.out",
+    "read_params": {"to_lower": true, "append_case": "first"},
+    "train_read_params": {"max_sents": 1000},
+    "additional_read_params": {"max_sents": 15000},
+    "stop_callback": {"patience": 5, "monitor": "val_acc"}
+}
