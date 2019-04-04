@@ -116,8 +116,7 @@ def read_tags_infile(infile, read_words=False, to_lower=False,
                      tag_column=TAG_COLUMN, lemma_column=LEMMA_COLUMN,
                      read_only_words=False, return_source_words=False,
                      return_lemmas=False, return_source_text=False,
-                     read_feats=True, allow_multiple_tags=False,
-                     max_sents=-1, to_shuffle=False):
+                     read_feats=True, max_sents=-1, to_shuffle=False):
     answer, curr_tag_sent, curr_word_sent = [], [], []
     source_answer, curr_source_sent = [], []
     lemma_sents, curr_lemma_sent = [], []
@@ -143,7 +142,6 @@ def read_tags_infile(infile, read_words=False, to_lower=False,
                 curr_tag_sent, curr_word_sent = [], []
                 curr_source_sent, curr_lemma_sent = [], []
                 curr_source_text = []
-                last_digit = -1
                 if len(answer) == max_sents and not to_shuffle:
                     break
                 continue
@@ -151,7 +149,6 @@ def read_tags_infile(infile, read_words=False, to_lower=False,
             index = splitted[0]
             if not index.isdigit() and index != "_":
                 continue
-            index = int(index) if index != "_" else int(len(curr_tag_sent)) + 1
             word, lemma = splitted[word_column], splitted[lemma_column]
             processed_word = process_word(word, to_lower=to_lower, append_case=append_case)
             pos, tag = splitted[pos_column], (splitted[tag_column] if read_feats else "_")
@@ -163,23 +160,10 @@ def read_tags_infile(infile, read_words=False, to_lower=False,
                 curr_tag = pos
             else:
                 curr_tag = "{},{}".format(pos, tag)
-            if not allow_multiple_tags:
-                if index == last_digit:
-                    continue
-                curr_source_sent.append(word)
-                curr_word_sent.append(processed_word)
-                curr_lemma_sent.append(lemma)
-                curr_tag_sent.append(curr_tag)
-            else:
-                curr_source_sent.append(word)
-                if index != last_digit:
-                    curr_word_sent.append(processed_word)
-                    curr_lemma_sent.append([lemma])
-                    curr_tag_sent.append([curr_tag])
-                else:
-                    curr_lemma_sent[-1].append(lemma)
-                    curr_tag_sent[-1].append(curr_tag)
-            last_digit = index
+            curr_source_sent.append(word)
+            curr_word_sent.append(processed_word)
+            curr_lemma_sent.append(lemma)
+            curr_tag_sent.append(curr_tag)
             curr_source_text.append(line)
         if len(curr_tag_sent) > 0:
             to_append = (curr_word_sent if read_only_words

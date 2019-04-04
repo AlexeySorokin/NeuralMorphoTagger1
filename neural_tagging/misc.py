@@ -29,19 +29,25 @@ class TagNormalizer:
 
     def __init__(self, max_error=2):
         self.max_error = max_error
+        self.label_mapping = dict()
 
     @property
     def nodes_number(self):
         return len(self._trie)
 
-    def to_json(self, outfile):
+    def to_json(self, outfile, label_file=None):
         data = dict()
         for (attr, val) in inspect.getmembers(self):
             if not (attr.startswith("__") or inspect.ismethod(val)
-                    or isinstance(getattr(TagNormalizer, attr, None), property)):
+                    or isinstance(getattr(TagNormalizer, attr, None), property)
+                    or attr == "label_mapping"):
                 data[attr] = val
         with open(outfile, "w", encoding="utf8") as fout:
             json.dump(data, fout)
+        if label_file is not None:
+            with open(label_file, "w", encoding="utf8") as fout:
+                for old_tag, new_tag in sorted(self.label_mapping.items()):
+                    fout.write("{}\t{}\n".format(old_tag, new_tag))
 
     def train(self, labels):
         while isinstance(labels[0], list):
@@ -54,6 +60,7 @@ class TagNormalizer:
         for pos, tag in labels:
             for key, value in tag:
                 self.feats[key][value] += 1
+                self.feats_by_pos[pos].add(key)
         self.max_values = {feat: max(values.keys(), key=lambda x: values[x])
                            for feat, values in self.feats.items()}
         self._make_trie(labels)
@@ -106,6 +113,8 @@ class TagNormalizer:
     def transform(self, tag, mode=None):
         if isinstance(tag, list):
             return [self.transform(x, mode=mode) for x in tag]
+        if tag in self.label_mapping:
+            return self.label_mapping[tag]
         pos, feats = make_UD_pos_and_tag(tag, return_mode="items")
         if pos not in self.pos:
             return pos if mode == "UD" else (pos, tuple())
@@ -122,8 +131,10 @@ class TagNormalizer:
                 answer = new_answer
         if mode == "UD":
             answer = make_full_UD_tag(pos, answer, mode="items")
-            return answer
-        return (pos, tuple(answer))
+        else:
+            answer = (pos, tuple(answer))
+        self.label_mapping[tag] = answer
+        return answer
 
     def _search_trie(self, pos, feats):
         curr = self._trie[0][pos]
@@ -139,6 +150,7 @@ class TagNormalizer:
             if index == len(feats):
                 if self._counts[curr] > 0 and (min_cost is None or (cost, freq) < min_cost):
                     final_answer, min_cost = data, (cost, freq)
+                is_feat_possible = 1
             else:
                 feat, value = feats[index]
                 feat_data = node.get(feat)
@@ -147,9 +159,12 @@ class TagNormalizer:
                     if child is not None:
                         new_data = data + (feats[index],)
                         agenda[(child, index+1, new_data)] = (cost, -self._trie_counts[child])
-            if cost < self.max_error:
+                is_feat_possible = index < len(feats) and int(feat in self.feats_by_pos[pos])
+            if cost <= self.max_error - is_feat_possible:
                 if index < len(feats):
-                    agenda[(curr, index+1, data)]  = (cost+1, -self._trie_counts[curr])
+                    agenda[(curr, index+1, data)]  = (cost+is_feat_possible, -self._trie_counts[curr])
+                if cost == self.max_error:
+                    continue
                 for other_feat, feat_data in node.items():
                     if index == len(feats) or other_feat < feat:
                         for value, child in feat_data.items():

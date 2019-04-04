@@ -454,7 +454,7 @@ class NeuralLM:
                 train_indexes_by_buckets.append(curr_indexes)
         if model_file is not None:
             callback = ModelCheckpoint(model_file, save_weights_only=True,
-                                       save_best_only=True, verbose=0)
+                                       save_best_only=True, verbose=1)
             if self.callbacks is not None:
                 self.callbacks.append(callback)
             else:

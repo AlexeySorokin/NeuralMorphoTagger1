@@ -4,7 +4,7 @@ import sys
 import numpy as np
 from keras.callbacks import Callback, EarlyStopping
 
-from neural_LM.common import PAD, to_one_hot
+from common.common import PAD, to_one_hot
 
 
 class CustomCallback(Callback):

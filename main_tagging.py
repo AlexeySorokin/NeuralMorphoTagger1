@@ -29,7 +29,7 @@ DEFAULT_LIST_PARAMS = ["vectorizers", "additional_train_files",
                        "additional_dev_files", "additional_test_files"]
 DEFAULT_DICT_PARAMS = ["model_params", "read_params", "predict_params", "vocabulary_files",
                        "train_read_params", "dev_read_params", "test_read_params",
-                       "train_params"]
+                       "train_params", "checkpoints", "normalizer_params"]
 DEFAULT_DICT_WITH_KEY_PARAMS = {"dev_split_params": ["shuffle", "validation_split"]}
 
 
@@ -251,7 +251,8 @@ if __name__ == '__main__':
         if len(params["additional_train_files"]) > 0:
             if normalizer is None:
                 normal_tags = train_labels + (dev_labels if dev_labels is not None else [])
-                normalizer = TagNormalizer().train(normal_tags)
+                normalizer_params = params["normalizer_params"]
+                normalizer = TagNormalizer(**normalizer_params).train(normal_tags)
             additional_train_datasets = defaultdict(list)
             additional_read_params = params.get("additional_read_params", train_read_params)
             if isinstance(additional_read_params, dict):
@@ -267,7 +268,7 @@ if __name__ == '__main__':
                 curr_labels = [[normalizer.transform(x, mode="UD") for x in elem] for elem in curr_labels]
                 additional_train_labels.append(curr_labels)
             if "tag_normalizer_save_file" in params:
-                normalizer.to_json(params["tag_normalizer_save_file"])
+                normalizer.to_json(params["tag_normalizer_save_file"], params.get("tag_normalizer_mapping_file"))
         else:
             additional_train_data, additional_train_labels = None, None
         if "word_substitution_file" in params:
@@ -279,7 +280,8 @@ if __name__ == '__main__':
                   words_to_substitute=words_to_substitute,
                   train_params=params["train_params"],
                   model_file=params["model_file"], save_file=params["save_file"],
-                  lm_file=params["lm_file"], **params["vocabulary_files"])
+                  lm_file=params["lm_file"], checkpoints=params["checkpoints"],
+                  **params["vocabulary_files"])
     elif params["load_file"] is not None:
         cls, train_data = load_tagger(params["load_file"]), None
     else:

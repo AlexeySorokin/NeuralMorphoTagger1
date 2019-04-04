@@ -625,10 +625,10 @@ class CharacterTagger:
 
     def train(self, data, labels, dev_data=None, dev_labels=None,
               additional_data=None, additional_labels=None,
-              train_params=None, to_build=True,
-              words_to_substitute=None,
+              train_params=None, to_build=True, words_to_substitute=None,
               symbol_vocabulary_file=None, tags_vocabulary_file=None,
-              lm_file=None, model_file=None, save_file=None):
+              lm_file=None, model_file=None, save_file=None,
+              checkpoints=None):
         """
         Trains the tagger on data :data: with labels :labels:
 
@@ -702,13 +702,15 @@ class CharacterTagger:
         self._train_on_data(X_train, indexes_by_buckets, X_dev,
                             dev_indexes_by_buckets, dataset_codes=dataset_codes,
                             model_file=model_file,
-                            train_dataset_codes_by_buckets=dataset_codes_by_buckets)
+                            train_dataset_codes_by_buckets=dataset_codes_by_buckets,
+                            checkpoints=checkpoints)
         return self
 
     def _train_on_data(self, X, indexes_by_buckets, X_dev=None,
                        dev_indexes_by_buckets=None, model_file=None,
                        dataset_codes=None, train_dataset_codes_by_buckets=None,
-                       dev_dataset_codes_by_buckets=None):
+                       dev_dataset_codes_by_buckets=None,
+                       checkpoints=None):
         if dataset_codes is None:
             weights = np.ones(shape=(len(X)))
         else:
@@ -721,6 +723,8 @@ class CharacterTagger:
             validation_split = self.validation_split
         else:
             validation_split = 0.0
+        checkpoints = checkpoints or dict()
+        checkpoints = {index: self._make_model_file(file) for index, file in checkpoints.items()}
         train_indexes_by_buckets = []
         for curr_indexes in indexes_by_buckets:
             np.random.shuffle(curr_indexes)
@@ -734,23 +738,6 @@ class CharacterTagger:
             train_dataset_codes_by_buckets = [0] * len(train_indexes_by_buckets)
         if dev_dataset_codes_by_buckets is None:
             dev_dataset_codes_by_buckets = [0] * len(dev_indexes_by_buckets)
-        # if self.n_warmup_epochs > 0:
-        #     fields_number = 1 + int(self.morpho_dict is not None)
-        #     train_gen = generate_data(X, train_indexes_by_buckets, self.tags_number_,
-        #                               self.batch_size, use_last=False,
-        #                               duplicate_answer=False, fields_number=fields_number,
-        #                               yield_weights=self.to_weigh_loss)
-        #     dev_gen = generate_data(X_dev, dev_indexes_by_buckets, self.tags_number_,
-        #                             use_last=False, shuffle=False, duplicate_answer=False,
-        #                             fields_number=fields_number,
-        #                             yield_weights=self.to_weigh_loss)
-        #     self.warmup_model_.fit_generator(
-        #         train_gen, steps_per_epoch=train_steps, epochs=self.n_warmup_epochs,
-        #         callbacks=self.callbacks, validation_data=dev_gen,
-        #         validation_steps=dev_steps, verbose=1)
-
-        # are_train_buckets_active = self._make_active_buckets(train_dataset_codes_by_buckets)
-        # are_dev_buckets_active = self._make_active_buckets(dev_dataset_codes_by_buckets)
         monitor = ("val_p_output_acc" if self.use_lm else "val_acc")
         for m, model in enumerate(self.models_):
             callbacks = self.callbacks[:] if self.callbacks is not None else []
@@ -802,13 +789,12 @@ class CharacterTagger:
                 for callback in callbacks:
                     if isinstance(callback, ModelCheckpoint):
                         callback.save_best_only = (dev_steps > 0)
-                # TO_DO: set callback values
-                # for callback in self.callbacks:
-                #     if isinstance(callback, MultirunEarlyStopping):
                 model.fit_generator(
                     train_gen, steps_per_epoch=train_steps, epochs=t+1,
                     callbacks=callbacks, validation_data=dev_gen,
                     validation_steps=dev_steps, initial_epoch=t, verbose=1)
+                if t+1 in checkpoints:
+                    model.save_weights(checkpoints[t+1][m])
                 if model.stop_training:
                     break
 
@@ -1221,7 +1207,7 @@ class CharacterTagger:
 
     def _freeze_output_network(self, model):
         for layer in model.layers:
-            if layer.name.startswith("word_lstm") or layer.name == "p":
+            if layer.name == "p" or layer.name[:2] == "p_":
                 layer.trainable = False
         model.compile(**self._compile_args)
         return

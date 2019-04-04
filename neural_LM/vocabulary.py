@@ -6,8 +6,8 @@ from common.common import *
 from neural_LM.UD_preparation.extract_tags_from_UD import make_UD_pos_and_tag, make_full_UD_tag
 
 
-def vocabulary_from_json(info, use_features=False, decompose_labels=False):
-    cls = DecomposingVocabulary if decompose_labels else FeatureVocabulary if use_features else Vocabulary
+def vocabulary_from_json(info, use_features=False):
+    cls = FeatureVocabulary if use_features else Vocabulary
     info_to_initialize = dict(elem for elem in info.items() if elem[0][-1] != "_")
     vocab = cls(**info_to_initialize)
     args = dict()
@@ -21,7 +21,7 @@ def vocabulary_from_json(info, use_features=False, decompose_labels=False):
             setattr(vocab, attr, val)
     if hasattr(vocab, "symbols_") and not hasattr(vocab, "symbol_codes_"):
         vocab.symbol_codes_ = {x: i for i, x in enumerate(vocab.symbols_)}
-    if use_features and not decompose_labels:
+    if use_features:
         vocab._make_features(**args)
     return vocab
 
@@ -183,68 +183,3 @@ class FeatureVocabulary(Vocabulary):
 
     def jsonize(self):
         return super().jsonize()
-
-UNKNOWN_VALUE = 1
-
-class DecomposingVocabulary:
-
-    def __init__(self, min_count=1):
-        self.min_count = min_count
-
-    def train(self, text):
-        tags, feat_values = set(), defaultdict(set)
-        feats_for_tags = defaultdict(set)
-        for sent in text:
-            for tag in sent:
-                tag, feats = make_UD_pos_and_tag(tag, return_mode="items")
-                tags.add(tag)
-                for feat, value in feats:
-                    feat_values[feat].add(value)
-                    feats_for_tags[tag].add(feat)
-        self.tags_ = ["PAD", "UNKNOWN_VALUE"] + sorted(tags)
-        self.tag_codes_ = {tag: code for code, tag in enumerate(self.tags_)}
-        self.feats_for_tags_ = [sorted(feats_for_tags[tag]) for tag in self.tags_]
-        self.feats_= sorted(feat_values.keys())
-        self.feat_codes_ = {feat: code for code, feat in enumerate(self.feats_)}
-        self.feat_values_ = [(["PAD"] + sorted(feat_values[key])) for key in self.feats_]
-        self.feat_value_codes_ = [{value: code for code, value in enumerate(elem)} for elem in self.feat_values_]
-        return self
-
-    @property
-    def feats_number_(self):
-        return len(self.feats_)
-
-    def toidx(self, x):
-        tag, feats = make_UD_pos_and_tag(x, return_mode="items")
-        answer = np.zeros(shape=(self.feats_number_+1), dtype=int)
-        answer[0] = tag_code = self.tag_codes_.get(tag, UNKNOWN_VALUE)
-        for feat, value in feats:
-            feat_code = self.feat_codes_.get(feat)
-            if feat_code is None or feat not in self.feats_for_tags_[tag_code]:
-                continue
-            answer[feat_code+1] = self.feat_value_codes_[feat_code].get(value, PAD)
-        return answer
-
-    def fromidx(self, label):
-        tag = self.tags_[label[0]]
-        tag_index = self.tag_codes_[tag]
-        feats, values = [], []
-        for i, (feat, index) in enumerate(zip(self.feats_, label[1:])):
-            if feat in self.feats_for_tags_[tag_index] and index > 0:
-                feats.append(feat)
-                values.append(self.feat_values_[i][index])
-        if len(feats) == 0:
-            return tag
-        else:
-            feat_repr = "|".join("{}={}".format(*elem) for elem in zip(feats, values))
-            return "{},{}".format(tag, feat_repr)
-
-
-    @property
-    def symbols_number_(self):
-        return [len(self.tags_)] + [len(elem) for elem in self.feat_values_]
-
-    def jsonize(self):
-        info = {attr: val for attr, val in inspect.getmembers(self)
-                if (not(attr.startswith("__") or inspect.ismethod(val)))}
-        return info
