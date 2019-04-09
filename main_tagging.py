@@ -269,14 +269,20 @@ if __name__ == '__main__':
                 additional_train_labels.append(curr_labels)
             if "tag_normalizer_save_file" in params:
                 normalizer.to_json(params["tag_normalizer_save_file"], params.get("tag_normalizer_mapping_file"))
+            if not normalizer.transform_to_normalized:
+                label_mapping = normalizer.label_mapping
+            else:
+                label_mapping = None
         else:
             additional_train_data, additional_train_labels = None, None
+            label_mapping = None
         if "word_substitution_file" in params:
             words_to_substitute = read_substitution_file(params["word_substitution_file"])
         else:
             words_to_substitute = None
         cls.train(train_data, train_labels, dev_data, dev_labels,
                   additional_train_data, additional_train_labels,
+                  label_mapping=label_mapping,
                   words_to_substitute=words_to_substitute,
                   train_params=params["train_params"],
                   model_file=params["model_file"], save_file=params["save_file"],

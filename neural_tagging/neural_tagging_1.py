@@ -58,7 +58,7 @@ def load_tagger(infile):
             value = vocabulary_from_json(value)
         elif key == "tags_":
             value = vocabulary_from_json(value, use_features=True)
-        elif key == "tag_embeddings_":
+        elif key in ["tag_embeddings_", "label_matrix_"]:
             value = np.asarray(value)
         elif key == "morpho_dict_":
             use_features = tagger.morpho_dict_params.get("type") in ["features" "native"]
@@ -143,8 +143,7 @@ class CharacterTagger:
     batch_params = training_parameter("batch_params")
     batching_probs_ = training_parameter('batching_probs_')
 
-    def __init__(self, models_number=1, reverse=False,
-                 use_lm_loss=False, use_lm=False,
+    def __init__(self, models_number=1, reverse=False, use_lm_loss=False, use_lm=False,
                  morpho_dict=None, morpho_dict_params=None,
                  morpho_dict_embeddings_size=256, word_vectorizers=None,
                  word_tag_vectorizers=None, embed_additional_features=False,
@@ -268,6 +267,8 @@ class CharacterTagger:
         if self.fusion_regularizer is not None:
             self.fusion_regularizer = kreg.l2(self.fusion_regularizer)
         np.random.seed(self.random_state)
+        self.label_mapping_ = None
+        self.label_matrix_ = None
 
     def _make_model_file(self, model_file):
         answer = []
@@ -450,6 +451,15 @@ class CharacterTagger:
             raise ValueError("Unknown morpho_dict_type: {}".format(morpho_dict_type))
         self.morpho_dict_indexes_func_ = func
 
+    def _make_label_matrix(self, mapping):
+        self.label_mapping_ = mapping
+        self.label_matrix_ = np.eye(self.tags_number_, dtype=int)
+        for tag, other in mapping.items():
+            tag_code = self.tags_.toidx(tag)
+            other_code = self.tags_.toidx(other)
+            self.label_matrix_[other_code, tag_code] = 1
+        return
+
     def transform(self, data, labels=None, pad=True, return_indexes=True,
                   buckets_number=None, bucket_size=None, join_buckets=True,
                   dataset_codes=None, join_datasets=True):
@@ -625,7 +635,8 @@ class CharacterTagger:
 
     def train(self, data, labels, dev_data=None, dev_labels=None,
               additional_data=None, additional_labels=None,
-              train_params=None, to_build=True, words_to_substitute=None,
+              train_params=None, to_build=True,
+              label_mapping=None, words_to_substitute=None,
               symbol_vocabulary_file=None, tags_vocabulary_file=None,
               lm_file=None, model_file=None, save_file=None,
               checkpoints=None):
@@ -642,12 +653,13 @@ class CharacterTagger:
             train_params = dict()
         self._set_train_params(**train_params)
         data_for_vocab, labels_for_vocab = data[:], labels[:]
+        # data_for_vocab, labels_for_vocab = data[:], []
         if additional_data is not None:
             for (elem, elem_labels) in zip(additional_data, additional_labels):
                 data_for_vocab += elem
                 labels_for_vocab += elem_labels
         if symbol_vocabulary_file is None:
-            self.symbols_ = Vocabulary(character=True, min_count=self.min_char_count).train(data)
+            self.symbols_ = Vocabulary(character=True, min_count=self.min_char_count).train(data_for_vocab)
         else:
             self.symbols_ = vocabulary_from_json(symbol_vocabulary_file, use_features=False)
         if tags_vocabulary_file is None:
@@ -659,6 +671,9 @@ class CharacterTagger:
             self.tags_ = vocabulary_from_json(tags_info, use_features=True)
         if self.verbose > 0:
             print("{} characters, {} tags".format(self.symbols_number_, self.tags_number_))
+        # creating label mapping
+        if label_mapping is not None:
+            self._make_label_matrix(label_mapping)
         # language model
         if lm_file is not None and (self.use_lm or self.use_lm_loss):
             lm = load_lm(lm_file)
@@ -681,6 +696,7 @@ class CharacterTagger:
         if self.to_substitute_words:
             self._make_tag_substitution_data(data, labels, words_to_substitute)
         if self.additional_inputs_number > 0 and additional_data is not None:
+            # data, labels, dataset_codes = [], [], []
             for code, (add_dataset, add_labels) in enumerate(zip(additional_data, additional_labels), 1):
                 data += add_dataset
                 dataset_codes += [code] * len(add_dataset)
@@ -738,7 +754,7 @@ class CharacterTagger:
             train_dataset_codes_by_buckets = [0] * len(train_indexes_by_buckets)
         if dev_dataset_codes_by_buckets is None:
             dev_dataset_codes_by_buckets = [0] * len(dev_indexes_by_buckets)
-        monitor = ("val_p_output_acc" if self.use_lm else "val_acc")
+        monitor = ("val_p_output_acc" if self.use_lm else "val_ambigious_accuracy" if self.label_matrix_ is not None else "val_acc")
         for m, model in enumerate(self.models_):
             callbacks = self.callbacks[:] if self.callbacks is not None else []
             if model_file is not None:
@@ -884,6 +900,9 @@ class CharacterTagger:
                     zip(bucket_labels, bucket_probs, bucket_basic_probs, bucket_indexes):
                 curr_labels = curr_labels[:len(data[index])]
                 curr_labels = [self.tags_.fromidx(label) for label in curr_labels]
+                if self.label_mapping_ is not None:
+                    new_curr_labels = [self.label_mapping_.get(label, label) for label in curr_labels]
+                    curr_labels = new_curr_labels
                 answer[index], probs[index] = curr_labels, curr_probs[:len(data[index])]
                 basic_probs[index] = curr_basic_probs
         return ((answer, probs, basic_probs) if (return_basic_probs and self.use_lm)
@@ -1069,8 +1088,10 @@ class CharacterTagger:
         basic_inputs.extend(additional_word_tag_inputs)
         pre_outputs, states = self._build_basic_network(word_outputs, additional_word_tag_inputs)
         loss = (leader_loss(self.leader_loss_weight) if self.use_leader_loss else
+                # AmbigiousCategoricalEntropy(self.label_matrix_) if self.label_matrix_ is not None else
                 "categorical_crossentropy")
-        metric = "accuracy"
+        metric = AmbigiousAccuracy(self.label_matrix_) if self.label_matrix_ is not None else "accuracy"
+        # metric = "accuracy"
         compile_args = {"optimizer": ko.nadam(clipnorm=5.0), "loss": loss, "metrics": [metric]}
         if hasattr(self, "lm_"):
             position_inputs = kl.Lambda(positions_func)(word_inputs)

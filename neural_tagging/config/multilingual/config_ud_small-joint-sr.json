@@ -4,9 +4,8 @@
     "dev_files": ["/home/alexeysorokin/data/Data/UD2.3/UD_Serbian-SET/sr_set-ud-dev.conllu"],
     "test_files": ["/home/alexeysorokin/data/Data/UD2.3/UD_Serbian-SET/sr_set-ud-test.conllu"],
     "additional_train_files": [["/home/alexeysorokin/data/Data/UD2.3/UD_Russian-SynTagRus/ru_syntagrus-ud-train.conllu", 1]],
-    "save_file": "neural_tagging/models/work/srru-e1-rus.json",
-    "model_file": "neural_tagging/models/work/srru-e1-rus.hdf5",
-    "load_file": "neural_tagging/models/work/srru-e1-rus.json",
+    "save_file": "neural_tagging/models/work/srru-full-w2-rus.json",
+    "model_file": "neural_tagging/models/work/srru-full-w2-rus.hdf5",
     "model_params": {
         "additional_inputs_number": 1, "additional_inputs_weight": 1.0,
         "use_additional_symbol_features": true,
@@ -21,13 +20,11 @@
     "train_params": {
         "nepochs": 50, "freeze_after_transfer": false,
         "batch_params": {
-            "0": {"first_epoch": 2}, "1": {"decay_epoch": 2, "decay": 0.2}}
+            "0": {"first_epoch": 3}, "1": {"first_epoch": 1, "decay_epoch": 2, "decay": 0.2}}
     },
-    "normalizer_params": {"use_most_frequent_value": false, "max_error": 1},
-    "tag_normalizer_save_file": "neural_tagging/models/tag_normalizers/srruuk.json",
-    "tag_normalizer_mapping_file": "neural_tagging/models/tag_normalizers/srruuk-mapping.out",
+    "normalizer_params": {"use_most_frequent_value": false, "transform_to_normalized": true},
+    "tag_normalizer_save_file": "neural_tagging/models/tag_normalizers/srru.json",
+    "tag_normalizer_mapping_file": "neural_tagging/models/tag_normalizers/srru-mapping.out",
     "read_params": {"to_lower": true, "append_case": "first"},
-    "train_read_params": {"max_sents": 1000},
-    "additional_read_params": {"max_sents": 15000},
-    "stop_callback": {"patience": 5, "monitor": "val_acc"}
+    "stop_callback": {"patience": 5, "monitor": "val_ambigious_accuracy"}
 }

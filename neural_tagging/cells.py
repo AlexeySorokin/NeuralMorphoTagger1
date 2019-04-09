@@ -215,57 +215,20 @@ def first_sigmoid_acc(y_true, y_pred):
     return kb.cast(kb.equal(kb.argmax(y_true, axis=-1), first_pred), kb.floatx())
 
 
-def multioutput_categorical_crossentropy(y_true, y_pred):
-    """
-    Calculates standard crossentropy on concatenated
-    vectors of probabilities for models with multiple categorical outputs
-
-    :param y_true:
-    :param y_pred:
-    :return:
-    """
-    epsilon = kb.common.epsilon()
-    y_pred = kb.clip(y_pred, epsilon, 1.0 - epsilon)
-    return -kb.sum(y_true * kb.log(y_pred), axis=-1)
-
-class MultioutputAccuracy:
-
-    def __init__(self, bin_lengths):
-        self.partitions = np.zeros(shape=(len(bin_lengths) + 1), dtype=int)
-        self.partitions[1:] = np.cumsum(bin_lengths)
-        self.name = "multioutput_acc"
-
-    def __call__(self, y_true, y_pred):
-        dim = kb.ndim(y_true)
-        permute_mask = [dim - 1] + list(range(dim - 1))
-        y_true_permuted = kb.permute_dimensions(y_true, permute_mask)
-        y_pred_permuted = kb.permute_dimensions(y_pred, permute_mask)
-        def _make_slices(y):
-            return [y[start:end] for start, end in zip(self.partitions[:-1], self.partitions[1:])]
-        true_slices, pred_slices = _make_slices(y_true_permuted), _make_slices(y_pred_permuted)
-        eq_slices = [kb.cast(kb.equal(kb.argmax(x, axis=0),  kb.argmax(y, axis=0)), kb.floatx())
-                     for x, y in zip(true_slices, pred_slices)]
-        eq_slices = kb.stack(eq_slices, axis=0)
-        are_equal = kb.min(eq_slices, axis=0)
-        return are_equal
-
+def _make_matrix(matrix=None, unknown_index=None, start_index=0, classes_number=None):
+    if matrix is not None:
+        matrix = kb.constant(matrix)
+    elif classes_number is not None:
+        matrix = np.zeros(shape=(classes_number, classes_number))
+        if unknown_index is not None:
+            matrix[start_index:, unknown_index] = 1
+        matrix = kb.constant(matrix)
+    return matrix
 
 class AmbigiousCategoricalEntropy:
 
-    def __init__(self, matrix=None, unknown_index=None, start_index=0,
-                 m=3, classes_number=None, min_pred=0.25):
-        self.unknown_index = unknown_index
-        self.start_index = start_index
-        self.m = m
-        if matrix is not None:
-            self.matrix = kb.constant(matrix)
-        elif classes_number is not None:
-            matrix = np.zeros(shape=(classes_number, classes_number))
-            if self.unknown_index is not None:
-                matrix[start_index:, unknown_index] = 1
-            self.matrix = kb.constant(matrix)
-        else:
-            self.matrix = None
+    def __init__(self, matrix=None, unknown_index=None, start_index=0, classes_number=None, min_pred=0.0):
+        self.matrix = _make_matrix(matrix, unknown_index, start_index, classes_number)
         self.min_pred = min_pred
 
     def __call__(self, y_true, y_pred):
@@ -277,23 +240,24 @@ class AmbigiousCategoricalEntropy:
 
 class AmbigiousAccuracy:
 
-    def __init__(self, unknown_index=None):
-        if unknown_index is not None:
-            unknown_index = kb.constant(unknown_index, dtype="int64")
-        self.unknown_index = unknown_index
+    def __init__(self, matrix=None, unknown_index=None, start_index=0, classes_number=None, min_pred=0.0):
+        self.matrix = _make_matrix(matrix, unknown_index, start_index, classes_number)
+        self.min_pred = min_pred
         self.__name__ = "ambigious_accuracy"
 
     def __call__(self, y_true, y_pred):
         """
         точность для нескольких правильных ответов
         """
+        # оставляем только максимальный класс
         y_max_pred = kb.expand_dims(kb.max(y_pred, axis=-1), -1)
-        y_max_pred = kb.cast(y_pred >= y_max_pred, kb.floatx())
-        scores = kb.max(y_true * y_max_pred, axis=-1)
-        if self.unknown_index is not None:
-            are_unknown = kb.equal(kb.argmax(y_true, axis=-1), self.unknown_index)
-            scores = kb.maximum(kb.cast(are_unknown, kb.floatx()), scores)
+        y_pred = kb.cast(y_pred >= y_max_pred, kb.floatx())
+        if self.matrix is not None:
+            # домножаем на матрицу
+            y_pred = kb.minimum(kb.dot(y_pred, self.matrix), kb.cast(kb.ones_like(y_pred), kb.floatx()))
+        scores = kb.max(y_true * y_pred, axis=-1)
         return scores
+
 
 def leader_loss(weight):
     def _leader_loss(y_true, y_pred):

@@ -4,6 +4,8 @@ from heapdict import heapdict
 import inspect
 import ujson as json
 
+import numpy as np
+
 from neural_LM.UD_preparation.extract_tags_from_UD import *
 
 
@@ -27,9 +29,12 @@ def load_tag_normalizer(infile):
 
 class TagNormalizer:
 
-    def __init__(self, max_error=2, use_most_frequent_value=True):
+    def __init__(self, max_error=2, use_most_frequent_value=True,
+                 return_all=False, transform_to_normalized=True):
         self.max_error = max_error
         self.use_most_frequent_value = use_most_frequent_value
+        self.return_all = return_all
+        self.transform_to_normalized = transform_to_normalized
         self.label_mapping = dict()
 
     @property
@@ -40,8 +45,7 @@ class TagNormalizer:
         data = dict()
         for (attr, val) in inspect.getmembers(self):
             if not (attr.startswith("__") or inspect.ismethod(val)
-                    or isinstance(getattr(TagNormalizer, attr, None), property)
-                    or attr == "label_mapping"):
+                    or isinstance(getattr(TagNormalizer, attr, None), property)):
                 data[attr] = val
         with open(outfile, "w", encoding="utf8") as fout:
             json.dump(data, fout)
@@ -53,7 +57,7 @@ class TagNormalizer:
     def train(self, labels, counts=None):
         while isinstance(labels[0], list):
             labels = list(chain.from_iterable(labels))
-        labels = [make_UD_pos_and_tag(label, return_mode="items") for label in labels]
+        labels = [make_UD_pos_and_tag(label, return_mode="items", normalize_punct=False) for label in labels]
         if counts is None:
             counts = [1] * len(labels)
         self.labels = set(labels)
@@ -113,12 +117,21 @@ class TagNormalizer:
                     self._trie_counts[curr] = max(self._trie_counts[child], self._counts[curr])
         return self
 
+    def _output_tag(self, tag):
+        if not self.transform_to_normalized:
+            return tag
+        elif self.return_all:
+            to_choose = np.array(self.label_mapping[tag])
+            return np.random.choice(to_choose)
+        else:
+            return self.label_mapping[tag]
+
     def transform(self, tag, mode=None):
         if isinstance(tag, list):
             return [self.transform(x, mode=mode) for x in tag]
         if tag in self.label_mapping:
-            return self.label_mapping[tag]
-        pos, feats = make_UD_pos_and_tag(tag, return_mode="items")
+            return self._output_tag(tag)
+        pos, feats = make_UD_pos_and_tag(tag, return_mode="items", normalize_punct=False)
         if pos not in self.pos:
             return pos if mode == "UD" else (pos, tuple())
         answer = []
@@ -130,17 +143,27 @@ class TagNormalizer:
             answer.append((key, value))
         if (pos, tuple(answer)) not in self.labels:
             new_answer = self._search_trie(pos, answer)
-            if new_answer is not None:
-                answer = new_answer
+        else:
+            new_answer = None
+        if new_answer is not None and len(new_answer) > 0:
+            answer = new_answer
+        elif self.return_all:
+            answer = [answer]
         if mode == "UD":
-            answer = make_full_UD_tag(pos, answer, mode="items")
+            if self.return_all:
+                answer = [make_full_UD_tag(pos, elem, mode="items") for elem in answer]
+            else:
+                answer = make_full_UD_tag(pos, answer, mode="items")
         else:
             answer = (pos, tuple(answer))
+            if self.return_all:
+                answer = [answer]
         self.label_mapping[tag] = answer
-        return answer
+        return self._output_tag(tag)
 
-    def _find_matching_tag(self, tag, return_all=False, return_cost=False, mode="UD"):
-        pos, feats = make_UD_pos_and_tag(tag, return_mode="items")
+
+    def _find_matching_tag(self, tag, return_cost=False, mode="UD"):
+        pos, feats = make_UD_pos_and_tag(tag, return_mode="items", normalize_punct=False)
         new_feats = []
         for key, value in feats:
             if key not in self.feats:
@@ -148,8 +171,8 @@ class TagNormalizer:
             elif value not in self.feats[key]:
                 value = self.max_values[key]
             new_feats.append((key, value))
-        feat_answer = self._search_trie(pos, new_feats, return_all=return_all, return_cost=return_cost)
-        if not return_all:
+        feat_answer = self._search_trie(pos, new_feats, return_cost=return_cost)
+        if not self.return_all:
             feat_answer = [feat_answer] if feat_answer is not None else []
         if len(feat_answer) > 0:
             answer = []
@@ -163,24 +186,27 @@ class TagNormalizer:
                 if return_cost:
                     curr_answer = (curr_answer, cost)
                 answer.append(curr_answer)
-            if not return_all:
+            if not self.return_all:
                 answer = answer[0]
             return answer
         else:
-            return [] if return_all else None
+            return [] if self.return_all else None
 
-    def _search_trie(self, pos, feats, return_all=False, return_cost=False):
+    def _search_trie(self, pos, feats, return_cost=False):
         curr = self._trie[0].get(pos)
         if curr is None:
-            return [] if return_all else None
+            return [] if self.return_all else None
         key = (curr, 0, tuple())
         value = (0, 0)
         agenda = heapdict({key: value})
         answer, min_cost = [], None
         while len(agenda) > 0:
             (curr, index, data), (cost, freq) = agenda.popitem()
-            if min_cost is not None and (cost, freq) >= min_cost:
-                break
+            if min_cost is not None:
+                if cost > min_cost[0]:
+                    break
+                elif not self.return_all and freq > min_cost[1]:
+                    break
             node = self._trie[curr]
             if index == len(feats):
                 if self._counts[curr] > 0:
@@ -188,15 +214,20 @@ class TagNormalizer:
                     to_append = ((data, cost) if return_cost else data)
                     if min_cost is None or new_full_cost < min_cost:
                         answer, min_cost = [to_append], new_full_cost
-                    elif return_all and cost == min_cost[0]:
+                    elif self.return_all and cost == min_cost[0]:
                         answer.append(to_append)
-                        min_cost = min(new_full_cost, cost)
+                        min_cost = min(new_full_cost, min_cost)
                 is_feat_possible = 1
             else:
                 feat, value = feats[index]
                 feat_data = node.get(feat)
                 if feat_data is not None:
                     child = feat_data.get(value)
+                    # if child is None:
+                    #     for other, other_child in feat_data.items():
+                    #         if value in other.split(","):
+                    #             child = other_child
+                    #             break
                     if child is not None:
                         new_data = data + (feats[index],)
                         agenda[(child, index+1, new_data)] = (cost, -self._trie_counts[child])
@@ -207,11 +238,11 @@ class TagNormalizer:
                 if cost == self.max_error:
                     continue
                 for other_feat, feat_data in node.items():
-                    if index == len(feats) or other_feat < feat:
+                    if index == len(feats) or (other_feat < feat and (index == 0 or other_feat > feats[index-1][0])):
                         for value, child in feat_data.items():
                             new_data = data + ((other_feat, value),)
                             agenda[(child, index, new_data)] = (cost + 1, -self._trie_counts[child])
-        return answer if return_all else answer[0] if len(answer) > 0 else None
+        return answer if self.return_all else answer[0] if len(answer) > 0 else None
 
 
 if __name__ == "__main__":

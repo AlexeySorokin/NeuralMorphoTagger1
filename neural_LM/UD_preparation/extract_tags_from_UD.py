@@ -10,7 +10,7 @@ POS_MAPPING = {".": "<SENT>", "?": "<QUESTION>", "!":"<EXCLAM>",
 REVERSE_POS_MAPPING = list(POS_MAPPING.values())
 
 
-def make_UD_pos_and_tag(tag, return_mode=None):
+def make_UD_pos_and_tag(tag, return_mode=None, normalize_punct=True):
     splitted = tag.split(",", maxsplit=1)
     if len(splitted) == 2:
         pos, tag = splitted
@@ -23,7 +23,7 @@ def make_UD_pos_and_tag(tag, return_mode=None):
     else:
         pos = splitted[0]
         tag = dict() if return_mode == "dict" else ("_" if return_mode is None else tuple())
-    if pos in REVERSE_POS_MAPPING:
+    if normalize_punct and pos in REVERSE_POS_MAPPING:
         pos = "PUNCT"
     return pos, tag
 
