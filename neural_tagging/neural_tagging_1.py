@@ -740,7 +740,7 @@ class CharacterTagger:
         else:
             validation_split = 0.0
         checkpoints = checkpoints or dict()
-        checkpoints = {index: self._make_model_file(file) for index, file in checkpoints.items()}
+        checkpoints = {int(index): self._make_model_file(file) for index, file in checkpoints.items()}
         train_indexes_by_buckets = []
         for curr_indexes in indexes_by_buckets:
             np.random.shuffle(curr_indexes)
@@ -810,6 +810,7 @@ class CharacterTagger:
                     callbacks=callbacks, validation_data=dev_gen,
                     validation_steps=dev_steps, initial_epoch=t, verbose=1)
                 if t+1 in checkpoints:
+                    print("Saving model to", checkpoints[t+1][m])
                     model.save_weights(checkpoints[t+1][m])
                 if model.stop_training:
                     break

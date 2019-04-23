@@ -208,7 +208,7 @@ def make_output(cls, test_data, test_labels, predictions, probs, basic_probs=Non
 
 if __name__ == '__main__':
     config = tf.ConfigProto()
-    config.gpu_options.per_process_gpu_memory_fraction = 0.2
+    config.gpu_options.per_process_gpu_memory_fraction = 0.25
     kbt.set_session(tf.Session(config=config))
     random.seed(167)
     if len(sys.argv[1:]) != 1:

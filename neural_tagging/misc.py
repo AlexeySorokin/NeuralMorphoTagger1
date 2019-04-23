@@ -30,10 +30,11 @@ def load_tag_normalizer(infile):
 class TagNormalizer:
 
     def __init__(self, max_error=2, use_most_frequent_value=True,
-                 return_all=False, transform_to_normalized=True):
+                 return_all=False, sample_with_freq=False, transform_to_normalized=True):
         self.max_error = max_error
         self.use_most_frequent_value = use_most_frequent_value
         self.return_all = return_all
+        self.sample_with_freq = sample_with_freq
         self.transform_to_normalized = transform_to_normalized
         self.label_mapping = dict()
 
@@ -121,10 +122,15 @@ class TagNormalizer:
         if not self.transform_to_normalized:
             return tag
         elif self.return_all:
-            to_choose = np.array(self.label_mapping[tag])
-            return np.random.choice(to_choose)
+            to_choose = np.array([elem[0] for elem in self.label_mapping[tag]])
+            if self.sample_with_freq:
+                probs = np.array([elem[2] for elem in self.label_mapping[tag]], dtype=float)
+                probs /= np.sum(probs)
+            else:
+                probs = None
+            return np.random.choice(to_choose, p=probs)
         else:
-            return self.label_mapping[tag]
+            return self.label_mapping[tag][0]
 
     def transform(self, tag, mode=None):
         if isinstance(tag, list):
@@ -142,25 +148,25 @@ class TagNormalizer:
                 value = self.max_values[key]
             answer.append((key, value))
         if (pos, tuple(answer)) not in self.labels:
-            new_answer = self._search_trie(pos, answer)
+            new_answer = self._search_trie(pos, answer, return_cost=True)
         else:
             new_answer = None
         if new_answer is not None and len(new_answer) > 0:
             answer = new_answer
-        elif self.return_all:
-            answer = [answer]
-        if mode == "UD":
-            if self.return_all:
-                answer = [make_full_UD_tag(pos, elem, mode="items") for elem in answer]
-            else:
-                answer = make_full_UD_tag(pos, answer, mode="items")
         else:
-            answer = (pos, tuple(answer))
+            answer = (answer, 0, 1)
             if self.return_all:
                 answer = [answer]
+        if mode == "UD":
+            if self.return_all:
+                answer = [(make_full_UD_tag(pos, elem, mode="items"), cost, freq)
+                          for elem, cost, freq in answer]
+            else:
+                answer = (make_full_UD_tag(pos, answer[0], mode="items"),) + answer[1:]
+        else:
+            raise NotImplementedError
         self.label_mapping[tag] = answer
         return self._output_tag(tag)
-
 
     def _find_matching_tag(self, tag, return_cost=False, mode="UD"):
         pos, feats = make_UD_pos_and_tag(tag, return_mode="items", normalize_punct=False)
@@ -178,13 +184,13 @@ class TagNormalizer:
             answer = []
             for elem in feat_answer:
                 if return_cost:
-                    elem, cost = elem
+                    elem, cost, freq = elem
                 if mode == "UD":
                     curr_answer = make_full_UD_tag(pos, elem, mode="items")
                 else:
                     curr_answer = (pos, tuple(elem))
                 if return_cost:
-                    curr_answer = (curr_answer, cost)
+                    curr_answer = (curr_answer, cost, freq)
                 answer.append(curr_answer)
             if not self.return_all:
                 answer = answer[0]
@@ -211,7 +217,7 @@ class TagNormalizer:
             if index == len(feats):
                 if self._counts[curr] > 0:
                     new_full_cost = (cost, freq)
-                    to_append = ((data, cost) if return_cost else data)
+                    to_append = ((data, cost, -freq) if return_cost else data)
                     if min_cost is None or new_full_cost < min_cost:
                         answer, min_cost = [to_append], new_full_cost
                     elif self.return_all and cost == min_cost[0]:
