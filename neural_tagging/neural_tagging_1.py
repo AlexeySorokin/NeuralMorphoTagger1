@@ -130,6 +130,14 @@ def training_parameter(name):
     return property(_getter, _setter)
 
 
+def make_pretrain_dataset(dataset):
+    if not isinstance(dataset, dict):
+        Warning("Wrong dataset for pretraining.")
+        return None
+    if "data" not in dataset or "targets" not in dataset:
+        continue
+
+
 class CharacterTagger:
     """
     A class for character-based neural morphological tagger
@@ -635,6 +643,7 @@ class CharacterTagger:
 
     def train(self, data, labels, dev_data=None, dev_labels=None,
               additional_data=None, additional_labels=None,
+              pretrain_dataset=None,
               train_params=None, to_build=True,
               label_mapping=None, words_to_substitute=None,
               symbol_vocabulary_file=None, tags_vocabulary_file=None,
@@ -646,6 +655,9 @@ class CharacterTagger:
         data: list of lists of sequences, a list of sentences
         labels: list of lists of strs,
             a list of sequences of tags, each tag is a feature-value structure
+
+        pretrain_dataset: dict, containing fields "data", "targets", "dataset_codes",
+            "dev_data", "dev_targets", "dev_dataset_codes"
         :return:
         """
         # vocabularies for symbols and tags
@@ -658,6 +670,8 @@ class CharacterTagger:
             for (elem, elem_labels) in zip(additional_data, additional_labels):
                 data_for_vocab += elem
                 labels_for_vocab += elem_labels
+        if pretrain_dataset is not None:
+            pretrain_dataset = make_pretrain_dataset(pretrain_dataset)
         if symbol_vocabulary_file is None:
             self.symbols_ = Vocabulary(character=True, min_count=self.min_char_count).train(data_for_vocab)
         else:
