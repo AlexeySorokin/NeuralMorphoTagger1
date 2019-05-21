@@ -3,9 +3,9 @@
     "train_files": ["/home/alexeysorokin/data/Data/UD2.3/UD_Russian-SynTagRus/ru_syntagrus-ud-train.conllu"],
     "dev_files": ["/home/alexeysorokin/data/Data/UD2.3/UD_Russian-SynTagRus/ru_syntagrus-ud-dev.conllu"],
     "test_files": ["/home/alexeysorokin/data/Data/UD2.3/UD_Russian-SynTagRus/ru_syntagrus-ud-test.conllu"],
-    "model_file": "neural_tagging/models/work/ru-basic.hdf5",
-    "save_file": "neural_tagging/models/work/ru-basic.json",
-    "load_file": "neural_tagging/models/work/ru-basic.json",
+    "model_file": "neural_tagging/models/work/ru-basic-test.hdf5",
+    "save_file": "neural_tagging/models/work/ru-basic-test.json",
+    "load_file": "neural_tagging/models/work/ru-basic-test.json",
     "model_params": {
         "use_lm_loss": false, "use_lm": false, "normalize_lm_embeddings": false,
         "min_char_count": 3, "char_embeddings_size": 32, "char_window_size": [1, 2, 3, 4, 5, 6, 7],

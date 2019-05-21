@@ -8,7 +8,7 @@ import numpy as np
 import keras.backend as kb
 
 if kb.backend() == "tensorflow":
-    from common.cells_tensorflow import generate_future_mask
+    from common.common_tensorflow import generate_future_mask
 
 
 EPS = 1e-15

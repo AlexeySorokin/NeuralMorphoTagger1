@@ -17,7 +17,7 @@ from common.common import distributed_dot_softmax, distributed_transposed_dot,\
 if kb.backend() == "theano":
     from .cells_theano import make_history_theano, make_context_theano
 elif kb.backend() == "tensorflow":
-    from common.cells_tensorflow import *
+    from common.common_tensorflow import *
 
 
 def make_history(X, h, pad, flatten=False):

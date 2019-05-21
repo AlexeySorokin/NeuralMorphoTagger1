@@ -1,5 +1,4 @@
 import numpy as np
-import tensorflow as tf
 
 import keras.backend as kb
 import keras.layers as kl
@@ -7,7 +6,6 @@ import keras.activations as kact
 import keras.regularizers as kreg
 import keras.initializers as kinit
 from keras.engine.topology import InputSpec
-from keras.metrics import categorical_accuracy, binary_accuracy
 
 INFTY = -100
 from common.common import PAD
@@ -57,44 +55,6 @@ class DistanceMatcher(kl.Layer):
         output_shape[-1] = self.units
         return tuple(output_shape)
 
-
-
-class Highway(kl.Layer):
-
-    def __init__(self, activation=None, bias_initializer=-1, **kwargs):
-        super(Highway, self).__init__(**kwargs)
-        # self.output_dim = output_dim
-        self.activation = kact.get(activation)
-        self.bias_initializer = bias_initializer
-        if isinstance(self.bias_initializer, int):
-            self.bias_initializer = kinit.constant(self.bias_initializer)
-        self.input_spec = [InputSpec(min_ndim=2)]
-
-    def build(self, input_shape):
-        assert len(input_shape) >= 2
-        input_dim = input_shape[-1]
-
-        self.gate_kernel = self.add_weight(
-            shape=(input_dim, input_dim), initializer='uniform', name='gate_kernel')
-        self.gate_bias = self.add_weight(
-            shape=(input_dim,), initializer=self.bias_initializer, name='gate_bias')
-        self.dense_kernel = self.add_weight(
-            shape=(input_dim, input_dim), initializer='uniform', name='dense_kernel')
-        self.dense_bias = self.add_weight(
-            shape=(input_dim,), initializer=self.bias_initializer, name='dense_bias')
-        self.input_spec = InputSpec(min_ndim=2, axes={-1: input_dim})
-        self.built = True
-
-    def call(self, inputs, **kwargs):
-        gate = kb.dot(inputs, self.gate_kernel)
-        gate = kb.bias_add(gate, self.gate_bias, data_format="channels_last")
-        gate = self.activation(gate)
-        new_value = kb.dot(inputs, self.dense_kernel)
-        new_value = kb.bias_add(new_value, self.dense_bias, data_format="channels_last")
-        return gate * new_value + (1.0 - gate) * inputs
-
-    def compute_output_shape(self, input_shape):
-        return input_shape
 
 def weighted_sum(first, second, sigma, first_threshold=-np.inf, second_threshold=np.inf):
     logit_probs = first * sigma + second * (1.0 - sigma)

@@ -7,8 +7,7 @@ from keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
 from neural_LM.neural_LM import NeuralLM, read_input, load_lm
 from neural_LM.UD_preparation.read_tags import read_tags_input
-from neural_LM.UD_preparation.extract_tags_from_UD import read_tags_infile, extract_frequent_words
-
+from common.read import read_tags_infile, extract_frequent_words
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 

@@ -1,6 +1,6 @@
-import sys
-from collections import defaultdict
 import random
+import sys
+from collections.__init__ import defaultdict
 
 WORD_COLUMN, POS_COLUMN, TAG_COLUMN, LEMMA_COLUMN = 1, 3, 5, 2
 HEAD_COLUMN, DEP_COLUMN = 6, 7
@@ -9,57 +9,6 @@ POS_MAPPING = {".": "<SENT>", "?": "<QUESTION>", "!":"<EXCLAM>",
                ",": "<COMMA>", "-": "<HYPHEN>", "--": "<DASH>",
                ":": "COLON", ";": "SEMICOLON", "\"": "<QUOTE>"}
 REVERSE_POS_MAPPING = list(POS_MAPPING.values())
-
-
-def make_UD_pos_and_tag(tag, return_mode=None):
-    splitted = tag.split(",", maxsplit=1)
-    if len(splitted) == 2:
-        pos, tag = splitted
-        if return_mode is not None:
-            tag = tuple(tag.split("|"))
-            if return_mode == "dict":
-                tag = dict(elem.split("=") for elem in tag)
-            if return_mode == "items":
-                tag = tuple(sorted(tuple(elem.split("=")) for elem in tag))
-    else:
-        pos = splitted[0]
-        tag = dict() if return_mode == "dict" else ("_" if return_mode is None else tuple())
-    if pos in REVERSE_POS_MAPPING:
-        pos = "PUNCT"
-    return pos, tag
-
-
-def make_full_UD_tag(pos, tag, mode=None):
-    if tag == "_" or len(tag) == 0:
-        return pos
-    if mode == "dict":
-        tag, mode = sorted(tag.items()), "items"
-    if mode == "items":
-        tag, mode = ["{}={}".format(*elem) for elem in tag], "list"
-    if mode == "list":
-        tag = "|".join(tag)
-    return "{},{}".format(pos, tag)
-
-
-def decode_word(word):
-    first_upper, all_upper = False, False
-    start, end = 0, len(word)
-    if word[0] == "<FIRST_UPPER>":
-        first_upper, start = True, 1
-    elif word[0] == "<ALL_UPPER>":
-        all_upper, start = True, 1
-    elif word[-1] == "<FIRST_UPPER>":
-        first_upper, end = True, end-1
-    elif word[-1] == "<ALL_UPPER>":
-        all_upper, end = True, end-1
-    if "<DIGIT>" in word:
-        return None
-    answer = "".join(word[start:end])
-    if first_upper:
-        answer = answer[0].upper() + answer[1:]
-    elif all_upper:
-        answer = answer.upper()
-    return answer
 
 
 def process_word(word, to_lower=False, append_case=None):
@@ -83,32 +32,6 @@ def process_word(word, to_lower=False, append_case=None):
         elif append_case == "last":
             answer = answer + [uppercase]
     return tuple(answer)
-
-
-def extract_frequent_words(infiles, to_lower=False, append_case="first", threshold=20,
-                           relative_threshold=0.001, max_frequent_words=100):
-    counts = defaultdict(int)
-    for infile in infiles:
-        with open(infile, "r", encoding="utf8") as fin:
-            for line in fin:
-                line = line.strip()
-                if line.startswith("#") or line == "":
-                    continue
-                splitted = line.split("\t")
-                index = splitted[0]
-                if not index.isdigit():
-                    continue
-                word, pos, tag = splitted[WORD_COLUMN], splitted[POS_COLUMN], splitted[TAG_COLUMN]
-                word = process_word(word, to_lower=to_lower, append_case=append_case)
-                if pos not in ["SENT", "PUNCT"] and word != tuple("<DIGIT>"):
-                    tag = "{},{}".format(pos, tag) if tag != "_" else pos
-                    counts[(word, tag)] += 1
-    total_count = sum(counts.values())
-    threshold = max(relative_threshold * total_count, threshold)
-    counts = [elem for elem in counts.items() if elem[1] >= threshold]
-    counts = sorted(counts)[:max_frequent_words]
-    frequent_pairs = set(elem[0] for elem in counts)
-    return frequent_pairs
 
 
 def read_tags_infile(infile, read_words=False, to_lower=False,
@@ -197,43 +120,6 @@ def read_tags_infile(infile, read_words=False, to_lower=False,
     return tuple(answer) if len(answer) > 1 else answer[0]
 
 
-def read_morphemes_infile(infile, tokenize=False):
-    answer = []
-    with open(infile, "r", encoding="utf8") as fin:
-        curr_sent = []
-        for line in fin:
-            line = line.strip()
-            if line == "":
-                if len(curr_sent) > 0:
-                    answer.append(curr_sent)
-                curr_sent = []
-                continue
-            try:
-                _, morph_data = line.split("\t")
-            except:
-                print(line)
-                sys.exit()
-            morph_data = morph_data.split(" ")
-            curr_word, curr_morphs, curr_morph_types = "", [], []
-            for i, elem in enumerate(morph_data):
-                if "_" in elem:
-                    morph, morph_type = elem.split("_")
-                else:
-                    morph = elem
-                    morph_type = "ROOT" if i == 0 else "?" if i < len(morph_data) - 1 else "PART"
-                if morph_type not in ["PART"] or not tokenize:
-                    curr_word += morph
-                    curr_morphs.append(morph)
-                    curr_morph_types.append(morph_type)
-                else:
-                    curr_sent.append((curr_word, curr_morph_types, curr_morphs))
-                    curr_word, curr_morph_types, curr_morphs = morph, ["ROOT"], [morph]
-            curr_sent.append((curr_word, curr_morph_types, curr_morphs))
-        if len(curr_sent) > 0:
-            answer.append(curr_sent)
-    return answer
-
-
 def read_syntax_infile(infile, to_lower=False, append_case="first",
                        word_column=WORD_COLUMN, head_column=HEAD_COLUMN,
                        dep_column=DEP_COLUMN,
@@ -291,6 +177,119 @@ def read_syntax_infile(infile, to_lower=False, append_case="first",
         to_return.append(curr_answer)
     return tuple([answer] + to_return)
 
+
+def make_UD_pos_and_tag(tag, return_mode=None):
+    splitted = tag.split(",", maxsplit=1)
+    if len(splitted) == 2:
+        pos, tag = splitted
+        if return_mode is not None:
+            tag = tuple(tag.split("|"))
+            if return_mode == "dict":
+                tag = dict(elem.split("=") for elem in tag)
+            if return_mode == "items":
+                tag = tuple(sorted(tuple(elem.split("=")) for elem in tag))
+    else:
+        pos = splitted[0]
+        tag = dict() if return_mode == "dict" else ("_" if return_mode is None else tuple())
+    if pos in REVERSE_POS_MAPPING:
+        pos = "PUNCT"
+    return pos, tag
+
+
+def make_full_UD_tag(pos, tag, mode=None):
+    if tag == "_" or len(tag) == 0:
+        return pos
+    if mode == "dict":
+        tag, mode = sorted(tag.items()), "items"
+    if mode == "items":
+        tag, mode = ["{}={}".format(*elem) for elem in tag], "list"
+    if mode == "list":
+        tag = "|".join(tag)
+    return "{},{}".format(pos, tag)
+
+
+def decode_word(word):
+    first_upper, all_upper = False, False
+    start, end = 0, len(word)
+    if word[0] == "<FIRST_UPPER>":
+        first_upper, start = True, 1
+    elif word[0] == "<ALL_UPPER>":
+        all_upper, start = True, 1
+    elif word[-1] == "<FIRST_UPPER>":
+        first_upper, end = True, end-1
+    elif word[-1] == "<ALL_UPPER>":
+        all_upper, end = True, end-1
+    if "<DIGIT>" in word:
+        return None
+    answer = "".join(word[start:end])
+    if first_upper:
+        answer = answer[0].upper() + answer[1:]
+    elif all_upper:
+        answer = answer.upper()
+    return answer
+
+
+def extract_frequent_words(infiles, to_lower=False, append_case="first", threshold=20,
+                           relative_threshold=0.001, max_frequent_words=100):
+    counts = defaultdict(int)
+    for infile in infiles:
+        with open(infile, "r", encoding="utf8") as fin:
+            for line in fin:
+                line = line.strip()
+                if line.startswith("#") or line == "":
+                    continue
+                splitted = line.split("\t")
+                index = splitted[0]
+                if not index.isdigit():
+                    continue
+                word, pos, tag = splitted[WORD_COLUMN], splitted[POS_COLUMN], splitted[TAG_COLUMN]
+                word = process_word(word, to_lower=to_lower, append_case=append_case)
+                if pos not in ["SENT", "PUNCT"] and word != tuple("<DIGIT>"):
+                    tag = "{},{}".format(pos, tag) if tag != "_" else pos
+                    counts[(word, tag)] += 1
+    total_count = sum(counts.values())
+    threshold = max(relative_threshold * total_count, threshold)
+    counts = [elem for elem in counts.items() if elem[1] >= threshold]
+    counts = sorted(counts)[:max_frequent_words]
+    frequent_pairs = set(elem[0] for elem in counts)
+    return frequent_pairs
+
+
+def read_morphemes_infile(infile, tokenize=False):
+    answer = []
+    with open(infile, "r", encoding="utf8") as fin:
+        curr_sent = []
+        for line in fin:
+            line = line.strip()
+            if line == "":
+                if len(curr_sent) > 0:
+                    answer.append(curr_sent)
+                curr_sent = []
+                continue
+            try:
+                _, morph_data = line.split("\t")
+            except:
+                print(line)
+                sys.exit()
+            morph_data = morph_data.split(" ")
+            curr_word, curr_morphs, curr_morph_types = "", [], []
+            for i, elem in enumerate(morph_data):
+                if "_" in elem:
+                    morph, morph_type = elem.split("_")
+                else:
+                    morph = elem
+                    morph_type = "ROOT" if i == 0 else "?" if i < len(morph_data) - 1 else "PART"
+                if morph_type not in ["PART"] or not tokenize:
+                    curr_word += morph
+                    curr_morphs.append(morph)
+                    curr_morph_types.append(morph_type)
+                else:
+                    curr_sent.append((curr_word, curr_morph_types, curr_morphs))
+                    curr_word, curr_morph_types, curr_morphs = morph, ["ROOT"], [morph]
+            curr_sent.append((curr_word, curr_morph_types, curr_morphs))
+        if len(curr_sent) > 0:
+            answer.append(curr_sent)
+    return answer
 
 
 if __name__ == "__main__":

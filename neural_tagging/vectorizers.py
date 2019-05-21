@@ -8,7 +8,7 @@ import numpy as np
 from scipy.stats.contingency import chi2_contingency
 
 from neural_tagging.suffix_guesser import load_guesser
-from neural_LM.UD_preparation.extract_tags_from_UD import make_UD_pos_and_tag
+from common.read import make_UD_pos_and_tag
 from read import read_unimorph_infile, read_ud_infile
 
 # flog = open("neural_tagging/dump/log_words.out", "w", encoding="utf8")

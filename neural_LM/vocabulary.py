@@ -3,7 +3,7 @@ import inspect
 import itertools
 
 from common.common import *
-from neural_LM.UD_preparation.extract_tags_from_UD import make_UD_pos_and_tag, make_full_UD_tag
+from common.read import make_UD_pos_and_tag, make_full_UD_tag
 
 
 def vocabulary_from_json(info, use_features=False):

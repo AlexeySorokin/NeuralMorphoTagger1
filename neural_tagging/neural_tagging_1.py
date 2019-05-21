@@ -13,14 +13,15 @@ from keras import Model
 from keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
 
 from neural_LM.UD_preparation.read_tags import is_subsumed, descr_to_feats
-from neural_LM.UD_preparation.extract_tags_from_UD import decode_word
+from common.read import decode_word
 from neural_LM.vocabulary import Vocabulary, FeatureVocabulary, vocabulary_from_json
 from neural_LM.neural_LM import make_bucket_indexes
 from common.common import *
 from common.generate import DataGenerator, make_batch
 from neural_LM.neural_lm import load_lm
-from neural_tagging.cells import Highway, WeightedCombinationLayer, DistanceMatcher,\
+from neural_tagging.cells import WeightedCombinationLayer, DistanceMatcher,\
     TemporalDropout, leader_loss, positions_func
+from common.cells import build_word_cnn
 from neural_tagging.cells import AmbigiousCategoricalEntropy, AmbigiousAccuracy
 from neural_tagging.dictionary import read_dictionary
 from neural_tagging.vectorizers import load_vectorizer
@@ -1040,13 +1041,20 @@ class CharacterTagger:
             self.models_[i] = model
             if self.use_lm:
                 self.basic_models_[i], self.decoders_[i] = basic_model, decoder
+        if self.verbose > 0:
+            print(self.models_[0].summary())
         return self
 
     def _build_model(self):
         # word_inputs = kl.Input(shape=(None, MAX_WORD_LENGTH+2), dtype="int32")
         word_inputs = kl.Input(shape=(None, MAX_WORD_LENGTH+2, self.symbols_number_), dtype="int32")
         inputs, basic_inputs = [word_inputs], [word_inputs]
-        word_outputs = self._build_word_cnn(word_inputs)
+        word_outputs = build_word_cnn(word_inputs, char_embeddings_size=self.char_embeddings_size,
+                                      char_window_size=self.char_window_size, char_filters=self.char_filters,
+                                      char_filter_multiple=self.char_filter_multiple,
+                                      char_conv_layers=self.char_conv_layers, highway_layers=self.char_highway_layers,
+                                      dropout=self.conv_dropout, intermediate_dropout=self.intermediate_dropout,
+                                      highway_dropout=self.highway_dropout)
         if self.word_dropout > 0.0:
             word_outputs = kl.Dropout(self.word_dropout)(word_outputs)
         if hasattr(self, "lm_"):
@@ -1115,48 +1123,9 @@ class CharacterTagger:
             decoder = kb.Function(decoder_inputs + [kb.learning_phase()], [final_outputs])
         else:
             basic_model, decoder = None, None
-        # if self.verbose > 0:
-        #     print(self.model_.summary())
         return model, basic_model, decoder
 
-    def _build_word_cnn(self, inputs):
-        # inputs = kl.Lambda(kb.one_hot, arguments={"num_classes": self.symbols_number_},
-        #                    output_shape=lambda x: tuple(x) + (self.symbols_number_,))(inputs)
-        inputs = kl.Lambda(kb.cast, arguments={"dtype": "float32"})(inputs)
-        char_embeddings = kl.Dense(self.char_embeddings_size, use_bias=False)(inputs)
-        conv_outputs = []
-        self.char_output_dim_ = 0
-        for window_size, filters_number in zip(self.char_window_size, self.char_filters):
-            curr_output = char_embeddings
-            curr_filters_number = (min(self.char_filter_multiple * window_size, 200)
-                                   if filters_number is None else filters_number)
-            for _ in range(self.char_conv_layers - 1):
-                curr_output = kl.Conv2D(curr_filters_number, (1, window_size),
-                                        padding="same", activation="relu",
-                                        data_format="channels_last")(curr_output)
-                if self.conv_dropout > 0.0:
-                    curr_output = kl.Dropout(self.conv_dropout)(curr_output)
-            curr_output = kl.Conv2D(curr_filters_number, (1, window_size),
-                                    padding="same", activation="relu",
-                                    data_format="channels_last")(curr_output)
-            conv_outputs.append(curr_output)
-            self.char_output_dim_ += curr_filters_number
-        if len(conv_outputs) > 1:
-            conv_output = kl.Concatenate(axis=-1)(conv_outputs)
-        else:
-            conv_output = conv_outputs[0]
-        highway_input = kl.Lambda(kb.max, arguments={"axis": -2})(conv_output)
-        if self.intermediate_dropout > 0.0:
-            highway_input = kl.Dropout(self.intermediate_dropout)(highway_input)
-        for i in range(self.char_highway_layers - 1):
-            highway_input = Highway(activation="relu")(highway_input)
-            if self.highway_dropout > 0.0:
-                highway_input = kl.Dropout(self.highway_dropout)(highway_input)
-        if self.char_highway_layers > 0:
-            highway_output = Highway(activation="relu")(highway_input)
-        else:
-            highway_output = highway_input
-        return highway_output
+
 
     def _build_basic_network(self, word_outputs, additional_embeddings=None):
         """

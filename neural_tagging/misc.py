@@ -1,10 +1,9 @@
-from collections import defaultdict
 from itertools import chain
 from heapdict import heapdict
 import inspect
 import ujson as json
 
-from neural_LM.UD_preparation.extract_tags_from_UD import *
+from common.read import read_tags_infile, make_UD_pos_and_tag, make_full_UD_tag
 
 
 def load_tag_normalizer(infile):
