@@ -3,6 +3,7 @@ from collections import defaultdict
 import random
 
 WORD_COLUMN, POS_COLUMN, TAG_COLUMN, LEMMA_COLUMN = 1, 3, 5, 2
+HEAD_COLUMN, DEP_COLUMN = 6, 7
 
 POS_MAPPING = {".": "<SENT>", "?": "<QUESTION>", "!":"<EXCLAM>",
                ",": "<COMMA>", "-": "<HYPHEN>", "--": "<DASH>",
@@ -123,7 +124,6 @@ def read_tags_infile(infile, read_words=False, to_lower=False,
     source_texts, curr_source_text = [], []
     with open(infile, "r", encoding="utf8") as fin:
         print(infile)
-        last_digit = -1
         for line in fin:
             line = line.strip()
             if line.startswith("#"):
@@ -131,8 +131,6 @@ def read_tags_infile(infile, read_words=False, to_lower=False,
                 continue
             if line == "":
                 if len(curr_word_sent) > 0:
-                    # print(curr_word_sent)
-                    # print(curr_tag_sent)
                     to_append = (curr_word_sent if read_only_words
                                  else (curr_word_sent, curr_tag_sent))
                     answer.append(to_append)
@@ -152,8 +150,6 @@ def read_tags_infile(infile, read_words=False, to_lower=False,
             word, lemma = splitted[word_column], splitted[lemma_column]
             processed_word = process_word(word, to_lower=to_lower, append_case=append_case)
             pos, tag = splitted[pos_column], (splitted[tag_column] if read_feats else "_")
-            if lemma == "UNKN":
-                lemma, pos = None, "UNKN"
             if pos == "PUNCT" and word in POS_MAPPING:
                 pos = POS_MAPPING[word]
             if tag == "_":
@@ -236,6 +232,65 @@ def read_morphemes_infile(infile, tokenize=False):
         if len(curr_sent) > 0:
             answer.append(curr_sent)
     return answer
+
+
+def read_syntax_infile(infile, to_lower=False, append_case="first",
+                       word_column=WORD_COLUMN, head_column=HEAD_COLUMN,
+                       dep_column=DEP_COLUMN,
+                       max_sents=-1, to_shuffle=False):
+    """
+    Parameters
+    ----------
+    infile: input CONLL-U file
+
+    Returns
+    -------
+    words: the processed words
+    heads: the positions of heads
+    dependencies: the dependency types of words
+    """
+    answer, info_answer = [], []
+    curr_sent, curr_info_sent = [], []
+    with open(infile, "r", encoding="utf8") as fin:
+        print(infile)
+        for line in fin:
+            line = line.strip()
+            if line.startswith("#"):
+                continue
+            if line == "":
+                if len(curr_sent) > 0:
+                    answer.append(curr_sent)
+                    info_answer.append(curr_info_sent)
+                curr_sent, curr_info_sent = [], []
+                if len(answer) == max_sents and not to_shuffle:
+                    break
+                continue
+            splitted = line.split("\t")
+            index = splitted[0]
+            if not index.isdigit() and index != "_":
+                continue
+            word = splitted[word_column]
+            processed_word = process_word(word, to_lower=to_lower, append_case=append_case)
+            # pos, tag = splitted[pos_column], (splitted[tag_column] if read_feats else "_")
+            # if pos == "PUNCT" and word in POS_MAPPING:
+            #     pos = POS_MAPPING[word]
+            # if tag == "_":
+            #     curr_tag = pos
+            # else:
+            #     curr_tag = "{},{}".format(pos, tag)
+            curr_sent.append(processed_word)
+            curr_info = {"head": int(splitted[head_column]), "dep": splitted[dep_column]}
+            curr_info_sent.append(curr_info)
+        if len(curr_sent) > 0:
+            answer.append(curr_sent)
+            info_answer.append(curr_info_sent)
+    keys = ["head", "dep"]
+    to_return = []
+    for key in keys:
+        curr_answer = [[elem[key] for elem in sent] for sent in info_answer]
+        to_return.append(curr_answer)
+    return answer, *to_return
+
 
 
 if __name__ == "__main__":
