@@ -289,7 +289,7 @@ def read_syntax_infile(infile, to_lower=False, append_case="first",
     for key in keys:
         curr_answer = [[elem[key] for elem in sent] for sent in info_answer]
         to_return.append(curr_answer)
-    return answer, *to_return
+    return tuple([answer] + to_return)
 
 
 
@@ -297,7 +297,11 @@ if __name__ == "__main__":
     L = len(sys.argv[1:])
     for i in range(0, L, 2):
         infile, outfile = sys.argv[1+i:3+i]
-        answer = read_tags_infile(infile)
+        # answer = read_tags_infile(infile)
+        words, heads, deps = read_syntax_infile(infile)
         with open(outfile, "w", encoding="utf8") as fout:
-            for sent in answer:
-                fout.write("\n".join(sent) + "\n\n")
+        #     for sent in answer:
+        #         fout.write("\n".join(sent) + "\n\n")
+            for i in range(1):
+                for elem in zip(words[i], heads[i], deps[i]):
+                    fout.write(str(elem) + "\n")
