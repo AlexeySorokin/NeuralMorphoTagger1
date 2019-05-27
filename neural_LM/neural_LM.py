@@ -1,12 +1,7 @@
 """
 Эксперименты с языковыми моделями
 """
-import sys
-import os
-import getopt
 from collections import defaultdict
-import bisect
-import copy
 import itertools
 import inspect
 import json
@@ -24,7 +19,7 @@ from keras.callbacks import EarlyStopping, ModelCheckpoint
 from common.common import EPS, AUXILIARY, BEGIN, END, UNKNOWN, PAD
 from common.common import repeat_
 from common.generate import CustomCallback, generate_data
-from .vocabulary import Vocabulary, FeatureVocabulary, vocabulary_from_json
+from common.vocabulary import Vocabulary, FeatureVocabulary, vocabulary_from_json
 from .cells import make_history, AttentionCell, AttentionCell3D
 from .UD_preparation.read_tags import descr_to_feats
 

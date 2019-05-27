@@ -14,15 +14,14 @@ from keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
 
 from neural_LM.UD_preparation.read_tags import is_subsumed, descr_to_feats
 from common.read import decode_word
-from neural_LM.vocabulary import Vocabulary, FeatureVocabulary, vocabulary_from_json
+from common.vocabulary import Vocabulary, FeatureVocabulary, vocabulary_from_json
 from neural_LM.neural_LM import make_bucket_indexes
 from common.common import *
-from common.generate import DataGenerator, make_batch
+from common.generate import TaggingDataGenerator, make_batch
 from neural_LM.neural_lm import load_lm
 from neural_tagging.cells import WeightedCombinationLayer, DistanceMatcher,\
     TemporalDropout, leader_loss, positions_func
 from common.cells import build_word_cnn
-from neural_tagging.cells import AmbigiousCategoricalEntropy, AmbigiousAccuracy
 from neural_tagging.dictionary import read_dictionary
 from neural_tagging.vectorizers import load_vectorizer
 
@@ -775,16 +774,16 @@ class CharacterTagger:
                         continue
                     curr_dev_indexes.append(dev_indexes_by_buckets[i])
                     dev_steps += (len(dev_indexes_by_buckets[i]) - 1) // self.batch_size + 1
-                train_gen = DataGenerator(X_train, curr_train_indexes, self.tags_number_,
-                                          batch_size=self.batch_size, duplicate_answer=self.use_lm,
-                                          fields_to_one_hot={0: self.symbols_number_},
-                                          yield_weights=self.to_weigh_loss, weights=weights)
+                train_gen = TaggingDataGenerator(X_train, curr_train_indexes, self.tags_number_,
+                                                 batch_size=self.batch_size, duplicate_answer=self.use_lm,
+                                                 fields_to_one_hot={0: self.symbols_number_},
+                                                 yield_weights=self.to_weigh_loss, weights=weights)
                 if dev_steps > 0:
-                    dev_gen = DataGenerator(X_dev, curr_dev_indexes, self.tags_number_,
-                                            batch_size=self.batch_size, shuffle=False,
-                                            duplicate_answer=self.use_lm,
-                                            fields_to_one_hot={0: self.symbols_number_},
-                                            yield_weights=self.to_weigh_loss)
+                    dev_gen = TaggingDataGenerator(X_dev, curr_dev_indexes, self.tags_number_,
+                                                   batch_size=self.batch_size, shuffle=False,
+                                                   duplicate_answer=self.use_lm,
+                                                   fields_to_one_hot={0: self.symbols_number_},
+                                                   yield_weights=self.to_weigh_loss)
                 else:
                     dev_gen = None
                 for callback in callbacks:

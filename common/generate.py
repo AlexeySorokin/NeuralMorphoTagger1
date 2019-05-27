@@ -1,3 +1,4 @@
+from collections import defaultdict
 import itertools
 import sys
 
@@ -67,7 +68,8 @@ def make_batch(data, fields_to_one_hot=None):
             answer[k] = np.array([elem[k] for elem in data])
     return answer
 
-class DataGenerator:
+
+class TaggingDataGenerator:
 
     def __init__(self, X, indexes_by_buckets, output_symbols_number,
                  batch_size=None, epochs=None, active_buckets=None,
@@ -215,6 +217,85 @@ class DataGenerator:
         return self
 
 
+class DataGenerator:
+
+    def __init__(self, data, targets=None, additional_data=None,
+                 yield_targets=True, yield_indexes=False,
+                 symbols_number=None, classes_number=None,
+                 positions_are_classes=False,
+                 additional_symbols_number=None,
+                 batch_size=16, shuffle=False, nepochs=None):
+        self.data = data
+        self.targets = targets
+        self.additional_data = additional_data or []
+        self.yield_targets = yield_targets
+        self.yield_indexes = yield_indexes
+        self.symbols_number = symbols_number
+        self.classes_number = classes_number
+        self.positions_are_classes = positions_are_classes
+        self.additional_symbols_number = additional_symbols_number
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.nepochs = nepochs
+        self._initialize()
+
+    def _initialize(self):
+        if not isinstance(self.additional_symbols_number, list):
+            self.additional_symbols_number = [self.additional_symbols_number] * len(self.additional_data)
+        self.indexes = []
+        ordered_indexes = np.argsort([len(x) for x in self.data])
+        for i in range(0, len(ordered_indexes), self.batch_size):
+            self.indexes.append(ordered_indexes[i:i + self.batch_size])
+        self.step = 0
+        self.epoch = 0
+
+    @property
+    def steps_per_epoch(self):
+        return len(self.indexes)
+
+    def __iter__(self):
+        return self
+
+    def _make_batch(self, data, indexes, classes_number=None):
+        first_item = np.array(data[0])
+        if first_item.ndim > 0:
+            L = max(len(data[index]) for index in indexes)
+            shape = (len(indexes), L) + np.shape(first_item)[1:]
+            answer = np.zeros(shape=shape, dtype=first_item.dtype)
+            for i, index in enumerate(indexes):
+                answer[i, :len(data[index])] = data[index]
+        else:
+            answer = np.array([data[i] for i in indexes], dtype=first_item.dtype)
+        if classes_number is not None:
+            answer = to_one_hot(answer, classes_number)
+        return answer
+
+    def __next__(self):
+        if self.epoch == self.nepochs:
+            raise StopIteration()
+        if self.shuffle and self.step == 0:
+            np.random.shuffle(self.indexes)
+        curr_indexes = self.indexes[self.step]
+        curr_batch = self._make_batch(self.data, curr_indexes, self.symbols_number)
+        curr_additional_batch = [self._make_batch(elem, curr_indexes, n)
+                                 for elem, n in zip(self.additional_data, self.additional_symbols_number)]
+        answer = [[curr_batch] + curr_additional_batch]
+        if self.yield_targets and self.targets is not None:
+            if self.positions_are_classes:
+                classes_number = curr_batch.shape[1]
+            else:
+                classes_number = self.classes_number
+            curr_targets = self._make_batch(self.targets, curr_indexes, classes_number)
+            answer.append(curr_targets)
+        if self.yield_indexes:
+            answer.append(curr_indexes)
+        self.step += 1
+        if self.step == self.steps_per_epoch:
+            self.step = 0
+            self.epoch += 1
+        return tuple(answer)
+
+
 def generate_data(X, indexes_by_buckets, output_symbols_number,
                   batch_size=None, epochs=None, active_buckets=None,
                   use_last=True, has_answer=True,
@@ -275,3 +356,21 @@ def generate_data(X, indexes_by_buckets, output_symbols_number,
                 yield (to_yield, y_to_yield, weights_to_yield)
             else:
                 yield to_yield
+
+
+def sample_redundant_data(data, targets, threshold):
+    indices_by_words = defaultdict(list)
+    new_indices = []
+    for i, (word, target) in enumerate(zip(data, targets)):
+        indices_by_words[(word, target)].append(i)
+        for (word, target), curr_indices in indices_by_words.items():
+            m = len(curr_indices)
+            if m > threshold:
+                number_of_indices_to_select = threshold + int(np.log2(m - threshold))
+                indices_to_select = np.random.permutation(curr_indices)[:number_of_indices_to_select]
+            else:
+                indices_to_select = curr_indices[:]
+            new_indices.extend(indices_to_select)
+    data = [data[i] for i in new_indices]
+    targets = [targets[i] for i in new_indices]
+    return data, targets
