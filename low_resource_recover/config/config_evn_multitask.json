@@ -1,0 +1,8 @@
+{
+  "train_file": ["data/low-resource/evn/splitted/evn.train.ud", "data/low-resource/evn/splitted/evn.dev.ud"],
+  "dev_file": ["data/low-resource/test/gold.evn.test.ud"],
+  "test_file": "data/low-resource/test/gold.evn.test.ud",
+  "allow_infixes": false, "use_tags": false, "predict_tags": true,
+  "models_number": 1, "model_params": {"filters_number": 256, "tag_state_size": 192, "tag_loss_weight": 0.5},
+  "train_params": {"nepochs": 10, "batch_size": 16}
+}

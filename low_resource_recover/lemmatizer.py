@@ -3,6 +3,9 @@ from collections import defaultdict
 import itertools
 import ujson as json
 
+import tensorflow as tf
+import keras.backend.tensorflow_backend as kbt
+
 import keras.layers as kl
 from keras import Model
 import keras.activations as kact
@@ -49,12 +52,13 @@ class Lemmatizer:
     BATCH_SIZE, NEPOCHS = 16, 20
 
     def __init__(self, models_number=1, allow_infixes=False, count_threshold=None,
-                 use_tags=False, model_params=None):
+                 use_tags=False, predict_tags=False, model_params=None):
         self.models_number = models_number
         self.allow_infixes = allow_infixes
         self.model_params = model_params or dict()
         self.count_threshold = count_threshold
         self.use_tags = use_tags
+        self.predict_tags = predict_tags
 
     def transform(self, words):
         answer = []
@@ -85,8 +89,11 @@ class Lemmatizer:
         targets = self.make_targets(words, lemmas)
         data, targets = clear_data(data, targets, threshold=self.count_threshold)
         if tags is not None:
-            self.tags_ = FeatureVocabulary().train([tags])
-            tag_data = [self.tags_.to_vector(x, return_vector=True) for x in tags]
+            self.tags_ = FeatureVocabulary(min_count=3).train([tags])
+            if predict_tags:
+                tag_data = [self.tags_.toidx(x) for x in tags]
+            else:
+                tag_data = [self.tags_.to_vector(x, return_vector=True) for x in tags]
         else:
             tag_data, dev_tag_data = None, None
         if dev_words is not None:
@@ -94,7 +101,10 @@ class Lemmatizer:
             dev_targets = self.make_targets(dev_words, dev_lemmas)
             dev_data, dev_targets = clear_data(dev_data, dev_targets)
             if tags is not None:
-                dev_tag_data = [self.tags_.to_vector(x, return_vector=True) for x in dev_tags]
+                if predict_tags:
+                    dev_tag_data = [self.tags_.toidx(x) for x in dev_tags]
+                else:
+                    dev_tag_data = [self.tags_.to_vector(x, return_vector=True) for x in dev_tags]
         else:
             dev_data, dev_targets = None, None
         self.build(**self.model_params)
@@ -117,6 +127,9 @@ class Lemmatizer:
         if self.use_tags:
             additional_data.append(tag_data)
             pad_additional_data.append(False)
+        elif self.predict_tags:
+            additional_targets.append(tag_data)
+            additional_classes_number.append(self.tags_.symbols_number_)
         for model in self.models_:
             train_gen = DataGenerator(data, targets, additional_data=additional_data,
                                       pad_additional_data=pad_additional_data,
@@ -131,6 +144,8 @@ class Lemmatizer:
                     dev_targets = [elem[0] for elem in dev_targets]
                 if self.use_tags:
                     additional_dev_data.append(dev_tag_data)
+                elif self.predict_tags:
+                    additional_dev_targets.append(dev_tag_data)
                 dev_gen = DataGenerator(dev_data, dev_targets, additional_data=additional_dev_data,
                                         pad_additional_data=pad_additional_data,
                                         additional_targets=additional_dev_targets,
@@ -151,7 +166,8 @@ class Lemmatizer:
 
     def _build_model(self, symbol_embeddings_size=32, conv_layers=2,
                      filter_width=5, filters_number=192,
-                     tag_embeddings_size=64, use_lstm=False):
+                     tag_embeddings_size=64, tag_state_size=128,
+                     tag_loss_weight=1.0, use_lstm=False):
         if isinstance(filter_width, int):
             filter_width = [filter_width]
         if isinstance(filters_number, int):
@@ -179,7 +195,7 @@ class Lemmatizer:
         similarities = kl.Lambda(lambda x: x[...,0], output_shape=(lambda x: x[:-1]))(similarities)
         probs = kl.Softmax(name="ends")(similarities)
         outputs = [probs]
-        loss, metrics = ["categorical_crossentropy"], {"ends": "accuracy"}
+        loss, metrics, loss_weights = ["categorical_crossentropy"], {"ends": "accuracy"}, [1.0]
         if self.allow_infixes:
             infix_similarities = kl.Dense(1)(conv_output)
             infix_similarities = kl.Lambda(lambda x: x[..., 0],
@@ -188,9 +204,18 @@ class Lemmatizer:
             outputs.append(infix_probs)
             # вставить правильные метрики
             loss.append(MulticlassSigmoidLoss())
+            loss_weights.append(1.0)
             # metrics["deletions"] = MulticlassSigmoidAccuracy()
+        if self.predict_tags:
+            tag_states = kl.Dense(tag_state_size)(conv_output)
+            tag_states = kl.GlobalMaxPooling1D()(tag_states)
+            tag_probs = kl.Dense(self.tags_.symbols_number_, activation="softmax", name="tag_probs")(tag_states)
+            outputs.append(tag_probs)
+            loss.append("categorical_crossentropy")
+            loss_weights.append(tag_loss_weight)
+            # metrics["tag_probs"] = "accuracy"
         model = Model(inputs, outputs)
-        model.compile(optimizer="adam", loss=loss, metrics=metrics)
+        model.compile(optimizer="adam", loss=loss, metrics=metrics, loss_weights=loss_weights)
         return model
 
     def build(self, **kwargs):
@@ -222,6 +247,8 @@ class Lemmatizer:
             if self.allow_infixes:
                 curr_probs = np.mean([elem[0] for elem in predictions], axis=0)
                 curr_deletion_probs = np.mean([elem[1] for elem in predictions], axis=0)
+            elif self.predict_tags:
+                curr_probs = np.mean([elem[0] for elem in predictions], axis=0)
             else:
                 curr_probs = np.mean(predictions, axis=0)
             positions = np.argmax(curr_probs, axis=-1) - 1
@@ -253,33 +280,29 @@ def read_config(infile):
 
 
 if __name__ == "__main__":
-    # evenk
-    # train_file = ["data/low-resource/evn/splitted/evn.train.ud", "data/low-resource/evn/splitted/evn.dev.ud"]
-    # dev_file = "data/low-resource/test/gold.evn.test.ud"
-    # test_file = "data/low-resource/test/gold.evn.test.ud"
-    # allow_infixes = False
-    # selkoup
-    # train_file = ["data/low-resource/sel/splitted/sel.train.ud"]
-    # dev_file = "data/low-resource/sel/splitted/sel.dev.ud"
-    # test_file = "data/low-resource/test/gold.sel.test.ud"
-    # allow_infixes = True
-    # чтение данных
+    config = tf.ConfigProto()
+    config.gpu_options.per_process_gpu_memory_fraction = 0.2
+    kbt.set_session(tf.Session(config=config))
     config = read_config(sys.argv[1])
-    use_tags = config["use_tags"]
+    use_tags, predict_tags = config["use_tags"], config["predict_tags"]
     tag_sents, word_sents, lemma_sents = read_tags_infile(config["train_file"], **read_params)
     # преобразование в список слов
     words = list(itertools.chain.from_iterable(word_sents))
     lemmas = list(itertools.chain.from_iterable(lemma_sents))
-    tags = list(itertools.chain.from_iterable(tag_sents)) if use_tags else None
+    tags = list(itertools.chain.from_iterable(tag_sents)) if use_tags or predict_tags else None
     if "dev_file" in config:
         dev_tag_sents, dev_word_sents, dev_lemma_sents = read_tags_infile(config["dev_file"], **read_params)
         dev_words = list(itertools.chain.from_iterable(dev_word_sents))
         dev_lemmas = list(itertools.chain.from_iterable(dev_lemma_sents))
-        dev_tags = list(itertools.chain.from_iterable(dev_tag_sents)) if use_tags else None
+        if use_tags or predict_tags:
+            dev_tags = list(itertools.chain.from_iterable(dev_tag_sents))
+        else:
+            dev_tags = None
     else:
         dev_words, dev_lemmas, dev_tags = None, None, None
     # обучение модели
-    lemmatizer = Lemmatizer(allow_infixes=config["allow_infixes"], use_tags=use_tags,
+    lemmatizer = Lemmatizer(allow_infixes=config["allow_infixes"],
+                            use_tags=use_tags, predict_tags=not use_tags and config["predict_tags"],
                             models_number=config["models_number"], model_params=config["model_params"])
     lemmatizer.train(words, lemmas, dev_words, dev_lemmas,
                      tags=tags, dev_tags=dev_tags, **config["train_params"])
