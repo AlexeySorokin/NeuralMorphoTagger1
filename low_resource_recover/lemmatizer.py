@@ -1,5 +1,7 @@
+import sys
 from collections import defaultdict
 import itertools
+import ujson as json
 
 import keras.layers as kl
 from keras import Model
@@ -76,34 +78,49 @@ class Lemmatizer:
         return answer
 
     def train(self, words, lemmas, dev_words=None, dev_lemmas=None,
-              tags=None, dev_tags=None, nepochs=20, batch_size=16):
+              tags=None, dev_tags=None, nepochs=20, batch_size=16,
+              patience=-1):
         self.symbols_ = Vocabulary().train(words)
         data = self.transform(words)
         targets = self.make_targets(words, lemmas)
         data, targets = clear_data(data, targets, threshold=self.count_threshold)
         if tags is not None:
             self.tags_ = FeatureVocabulary().train([tags])
-            tag_data = [self.tags_.toidx(x) for x in tags]
+            tag_data = [self.tags_.to_vector(x, return_vector=True) for x in tags]
+        else:
+            tag_data, dev_tag_data = None, None
         if dev_words is not None:
             dev_data = self.transform(dev_words)
             dev_targets = self.make_targets(dev_words, dev_lemmas)
             dev_data, dev_targets = clear_data(dev_data, dev_targets)
+            if tags is not None:
+                dev_tag_data = [self.tags_.to_vector(x, return_vector=True) for x in dev_tags]
         else:
             dev_data, dev_targets = None, None
         self.build(**self.model_params)
-        self._train_model(data, targets, dev_data, dev_targets, nepochs=nepochs, batch_size=batch_size)
+        self._train_model(data, targets, dev_data, dev_targets,
+                          tag_data=tag_data, dev_tag_data=dev_tag_data,
+                          nepochs=nepochs, batch_size=batch_size, patience=patience)
         return self
 
     def _train_model(self, data, targets, dev_data=None, dev_targets=None,
-                     nepochs=20, batch_size=16, patience=5):
+                     tag_data=None, dev_tag_data=None,
+                     nepochs=20, batch_size=16, patience=-1):
+        additional_data, additional_dev_data = [], []
+        pad_additional_data = []
         additional_targets, additional_dev_targets = [], []
         additional_classes_number, use_length_for_additional_targets = [], []
         if self.allow_infixes:
             additional_targets.append([elem[1] for elem in targets])
             additional_classes_number.append(None)
             targets = [elem[0] for elem in targets]
+        if self.use_tags:
+            additional_data.append(tag_data)
+            pad_additional_data.append(False)
         for model in self.models_:
-            train_gen = DataGenerator(data, targets, additional_targets=additional_targets,
+            train_gen = DataGenerator(data, targets, additional_data=additional_data,
+                                      pad_additional_data=pad_additional_data,
+                                      additional_targets=additional_targets,
                                       classes_number=DataGenerator.POSITIONS_AS_CLASSES,
                                       additional_classes_number=additional_classes_number,
                                       shuffle=True, nepochs=None, batch_size=batch_size)
@@ -112,14 +129,19 @@ class Lemmatizer:
                 if self.allow_infixes:
                     additional_dev_targets.append([elem[1] for elem in dev_targets])
                     dev_targets = [elem[0] for elem in dev_targets]
-                dev_gen = DataGenerator(dev_data, dev_targets, additional_targets=additional_dev_targets,
+                if self.use_tags:
+                    additional_dev_data.append(dev_tag_data)
+                dev_gen = DataGenerator(dev_data, dev_targets, additional_data=additional_dev_data,
+                                        pad_additional_data=pad_additional_data,
+                                        additional_targets=additional_dev_targets,
                                         classes_number=DataGenerator.POSITIONS_AS_CLASSES,
                                         additional_classes_number=additional_classes_number,
                                         shuffle=False, batch_size=batch_size)
                 dev_steps = dev_gen.steps_per_epoch
-                monitor = "val_acc" if not self.allow_infixes else "val_ends_acc"
-                callback = EarlyStopping(monitor=monitor, patience=patience, restore_best_weights=True)
-                callbacks.append(callback)
+                if patience >= 0:
+                    monitor = "val_acc" if not self.allow_infixes else "val_ends_acc"
+                    callback = EarlyStopping(monitor=monitor, patience=patience, restore_best_weights=True)
+                    callbacks.append(callback)
             else:
                 dev_gen, dev_steps = None, None
             model.fit_generator(train_gen, steps_per_epoch=train_gen.steps_per_epoch, epochs=nepochs,
@@ -128,7 +150,8 @@ class Lemmatizer:
         return self
 
     def _build_model(self, symbol_embeddings_size=32, conv_layers=2,
-                     filter_width=5, filters_number=192, use_lstm=False):
+                     filter_width=5, filters_number=192,
+                     tag_embeddings_size=64, use_lstm=False):
         if isinstance(filter_width, int):
             filter_width = [filter_width]
         if isinstance(filters_number, int):
@@ -136,6 +159,13 @@ class Lemmatizer:
         symbol_inputs = kl.Input(shape=(None,), dtype="float32")
         inputs = [symbol_inputs]
         symbol_embeddings = kl.Embedding(self.symbols_.symbols_number_, symbol_embeddings_size)(symbol_inputs)
+        if self.use_tags:
+            tag_inputs = kl.Input(shape=(self.tags_.symbol_vector_size_,), dtype="float32")
+            inputs.append(tag_inputs)
+            tag_embeddings = kl.Dense(tag_embeddings_size)(tag_inputs)
+            # tag_embeddings = kl.Lambda(kb.expand_dims, arguments={"axis": 1})(tag_embeddings)
+            tiled_tag_embeddings = kl.Lambda(repeat_, arguments={"k": kb.shape(symbol_embeddings)[1]})(tag_embeddings)
+            symbol_embeddings = kl.Concatenate()([symbol_embeddings, tiled_tag_embeddings])
         conv_outputs = []
         for f, w in zip(filters_number, filter_width):
             curr_conv_output = symbol_embeddings
@@ -158,26 +188,34 @@ class Lemmatizer:
             outputs.append(infix_probs)
             # вставить правильные метрики
             loss.append(MulticlassSigmoidLoss())
-            metrics["deletions"] = MulticlassSigmoidAccuracy()
+            # metrics["deletions"] = MulticlassSigmoidAccuracy()
         model = Model(inputs, outputs)
         model.compile(optimizer="adam", loss=loss, metrics=metrics)
         return model
 
-    def build(self):
+    def build(self, **kwargs):
         self.models_ = [None] * self.models_number
         for i in range(self.models_number):
-            self.models_[i] = self._build_model()
+            self.models_[i] = self._build_model(**kwargs)
         print(self.models_[0].summary())
         return self
 
-    def predict(self, words, batch_size=16, model_indexes=None):
+    def predict(self, words, tags=None, batch_size=16, model_indexes=None):
         if model_indexes is None:
             model_indexes = list(range(self.models_number))
         elif isinstance(model_indexes, int):
             model_indexes = [model_indexes]
         data = self.transform(words)
+        if self.use_tags:
+            tag_data = [self.tags_.to_vector(x, return_vector=True) for x in tags]
+            additional_data = [tag_data]
+            pad_additional_data = [False]
+        else:
+            additional_data, pad_additional_data = [], []
         answer = [None] * len(words)
-        test_gen = DataGenerator(data, yield_indexes=True, yield_targets=False,
+        test_gen = DataGenerator(data, additional_data=additional_data,
+                                 pad_additional_data=pad_additional_data,
+                                 yield_indexes=True, yield_targets=False,
                                  batch_size=batch_size, nepochs=1)
         for batch, indexes in test_gen:
             predictions = [self.models_[i].predict(batch) for i in model_indexes]
@@ -202,32 +240,56 @@ class Lemmatizer:
 
 
 read_params = {"to_lower": False, "append_case": True, "return_source_words": True, "return_lemmas": True}
-USE_TAGS = True
+default_values = {"use_tags": False, "allow_infixes": False, "models_number": 1,
+                  "model_params": dict(), "train_params": dict()}
+
+def read_config(infile):
+    with open(infile, "r", encoding="utf8") as fin:
+        config = json.load(fin)
+    for key, value in default_values.items():
+        if key not in config:
+            config[key] = value
+    return config
+
 
 if __name__ == "__main__":
-    use_tags = USE_TAGS
-    train_file = ["data/low-resource/evn/splitted/evn.train.ud", "data/low-resource/evn/splitted/evn.dev.ud"]
-    dev_file = "data/low-resource/test/gold.evn.test.ud"
-    test_file = "data/low-resource/test/gold.evn.test.ud"
+    # evenk
+    # train_file = ["data/low-resource/evn/splitted/evn.train.ud", "data/low-resource/evn/splitted/evn.dev.ud"]
+    # dev_file = "data/low-resource/test/gold.evn.test.ud"
+    # test_file = "data/low-resource/test/gold.evn.test.ud"
+    # allow_infixes = False
+    # selkoup
+    # train_file = ["data/low-resource/sel/splitted/sel.train.ud"]
+    # dev_file = "data/low-resource/sel/splitted/sel.dev.ud"
+    # test_file = "data/low-resource/test/gold.sel.test.ud"
+    # allow_infixes = True
     # чтение данных
-    tag_sents, word_sents, lemma_sents = read_tags_infile(train_file, **read_params)
-    dev_tag_sents, dev_word_sents, dev_lemma_sents = read_tags_infile(dev_file, **read_params)
+    config = read_config(sys.argv[1])
+    use_tags = config["use_tags"]
+    tag_sents, word_sents, lemma_sents = read_tags_infile(config["train_file"], **read_params)
     # преобразование в список слов
     words = list(itertools.chain.from_iterable(word_sents))
     lemmas = list(itertools.chain.from_iterable(lemma_sents))
     tags = list(itertools.chain.from_iterable(tag_sents)) if use_tags else None
-    dev_words = list(itertools.chain.from_iterable(dev_word_sents))
-    dev_lemmas = list(itertools.chain.from_iterable(dev_lemma_sents))
-    dev_tags = list(itertools.chain.from_iterable(dev_tag_sents)) if use_tags else None
+    if "dev_file" in config:
+        dev_tag_sents, dev_word_sents, dev_lemma_sents = read_tags_infile(config["dev_file"], **read_params)
+        dev_words = list(itertools.chain.from_iterable(dev_word_sents))
+        dev_lemmas = list(itertools.chain.from_iterable(dev_lemma_sents))
+        dev_tags = list(itertools.chain.from_iterable(dev_tag_sents)) if use_tags else None
+    else:
+        dev_words, dev_lemmas, dev_tags = None, None, None
     # обучение модели
-    lemmatizer = Lemmatizer(allow_infixes=False, use_tags=use_tags).train(
-        words, lemmas, dev_words, dev_lemmas, tags=tags, dev_tags=dev_tags, nepochs=25)
+    lemmatizer = Lemmatizer(allow_infixes=config["allow_infixes"], use_tags=use_tags,
+                            models_number=config["models_number"], model_params=config["model_params"])
+    lemmatizer.train(words, lemmas, dev_words, dev_lemmas,
+                     tags=tags, dev_tags=dev_tags, **config["train_params"])
     # измерение качества
-    test_tag_sents, test_word_sents, test_lemma_sents = read_tags_infile(test_file, **read_params)
-    test_words = list(itertools.chain.from_iterable(test_word_sents))
-    test_lemmas = list(itertools.chain.from_iterable(test_lemma_sents))
-    test_tags = list(itertools.chain.from_iterable(test_tag_sents)) if use_tags else None
-    pred_lemmas = lemmatizer.predict(test_words, tags=test_tags)
-    equal = sum(int(x==y) for x, y in zip(test_lemmas, pred_lemmas))
-    print("Качество лемматизации: {:.2f}, {} из {}.".format(
-        100 * equal / len(test_lemmas), equal, len(test_lemmas)))
+    if "test_file" in config:
+        test_tag_sents, test_word_sents, test_lemma_sents = read_tags_infile(config["test_file"], **read_params)
+        test_words = list(itertools.chain.from_iterable(test_word_sents))
+        test_lemmas = list(itertools.chain.from_iterable(test_lemma_sents))
+        test_tags = list(itertools.chain.from_iterable(test_tag_sents)) if use_tags else None
+        pred_lemmas = lemmatizer.predict(test_words, tags=test_tags)
+        equal = sum(int(x==y) for x, y in zip(test_lemmas, pred_lemmas))
+        print("Качество лемматизации: {:.2f}, {} из {}.".format(
+            100 * equal / len(test_lemmas), equal, len(test_lemmas)))

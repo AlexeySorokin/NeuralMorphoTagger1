@@ -113,6 +113,16 @@ class FeatureVocabulary(Vocabulary):
         else:
             return [super().toidx(elem) for elem in possible_tags]
 
+    def to_vector(self, symbol, return_vector=False):
+        symbol, feats = make_UD_pos_and_tag(symbol, return_mode="items")
+        labels = {symbol} | {"{}_{}_{}".format(symbol, *x) for x in feats}
+        indexes = sorted(self.symbol_labels_codes_[x] for x in labels if x in self.symbol_labels_codes_)
+        if return_vector:
+            answer = np.zeros(shape=(len(self.symbol_labels_),), dtype=int)
+            answer[indexes] = 1
+            return answer
+        return indexes
+
     def _make_train_sent(self, sent):
         answer = []
         for elem in sent:

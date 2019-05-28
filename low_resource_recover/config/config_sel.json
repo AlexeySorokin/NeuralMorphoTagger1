@@ -1,0 +1,8 @@
+{
+  "train_file": ["data/low-resource/sel/splitted/sel.train.ud", "data/low-resource/sel/splitted/sel.dev.ud"],
+  "dev_file": ["data/low-resource/test/gold.sel.test.ud"],
+  "test_file": "data/low-resource/test/gold.sel.test.ud",
+  "allow_infixes": true, "use_tags": false,
+  "models_number": 1, "model_params": {"conv_layers": 2},
+  "train_params": {"nepochs": 20, "batch_size": 16}
+}

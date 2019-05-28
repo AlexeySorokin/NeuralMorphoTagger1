@@ -222,7 +222,7 @@ class DataGenerator:
     POSITIONS_AS_CLASSES = 0
 
     def __init__(self, data, targets=None, additional_data=None,
-                 additional_targets=None, use_first_item_length=True,
+                 pad_additional_data=True, additional_targets=None,
                  yield_targets=True, yield_indexes=False,
                  symbols_number=None, classes_number=None,
                  additional_symbols_number=None,
@@ -231,8 +231,8 @@ class DataGenerator:
         self.data = data
         self.targets = targets
         self.additional_data = additional_data or []
+        self.pad_additional_data = pad_additional_data
         self.additional_targets = additional_targets or []
-        self.use_first_item_length = use_first_item_length
         self.yield_targets = yield_targets
         self.yield_indexes = yield_indexes
         self.symbols_number = symbols_number
@@ -247,6 +247,8 @@ class DataGenerator:
     def _initialize(self):
         if not isinstance(self.additional_symbols_number, list):
             self.additional_symbols_number = [self.additional_symbols_number] * len(self.additional_data)
+        if isinstance(self.pad_additional_data, bool):
+            self.pad_additional_data = [self.pad_additional_data] * len(self.additional_data)
         self.indexes = []
         ordered_indexes = np.argsort([len(x) for x in self.data])
         for i in range(0, len(ordered_indexes), self.batch_size):
