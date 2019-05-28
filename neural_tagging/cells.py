@@ -235,6 +235,7 @@ class AmbigiousCategoricalEntropy:
         scores = -kb.log(kb.sum(y_true * y_pred, axis=-1))
         return scores
 
+
 class AmbigiousAccuracy:
 
     def __init__(self, unknown_index=None):
@@ -254,6 +255,7 @@ class AmbigiousAccuracy:
             are_unknown = kb.equal(kb.argmax(y_true, axis=-1), self.unknown_index)
             scores = kb.maximum(kb.cast(are_unknown, kb.floatx()), scores)
         return scores
+
 
 def leader_loss(weight):
     def _leader_loss(y_true, y_pred):

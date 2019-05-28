@@ -34,7 +34,7 @@ def process_word(word, to_lower=False, append_case=None):
     return tuple(answer)
 
 
-def read_tags_infile(infile, read_words=False, to_lower=False,
+def read_tags_infile(infiles, read_words=False, to_lower=False,
                      append_case="first", wrap=False, attach_tokens=False,
                      word_column=WORD_COLUMN, pos_column=POS_COLUMN,
                      tag_column=TAG_COLUMN, lemma_column=LEMMA_COLUMN,
@@ -45,52 +45,55 @@ def read_tags_infile(infile, read_words=False, to_lower=False,
     source_answer, curr_source_sent = [], []
     lemma_sents, curr_lemma_sent = [], []
     source_texts, curr_source_text = [], []
-    with open(infile, "r", encoding="utf8") as fin:
-        print(infile)
-        for line in fin:
-            line = line.strip()
-            if line.startswith("#"):
+    if isinstance(infiles, str):
+        infiles = [infiles]
+    for infile in infiles:
+        with open(infile, "r", encoding="utf8") as fin:
+            print(infile)
+            for line in fin:
+                line = line.strip()
+                if line.startswith("#"):
+                    curr_source_text.append(line)
+                    continue
+                if line == "":
+                    if len(curr_word_sent) > 0:
+                        to_append = (curr_word_sent if read_only_words
+                                     else (curr_word_sent, curr_tag_sent))
+                        answer.append(to_append)
+                        source_answer.append(curr_source_sent)
+                        lemma_sents.append(curr_lemma_sent)
+                        source_texts.append(curr_source_text)
+                    curr_tag_sent, curr_word_sent = [], []
+                    curr_source_sent, curr_lemma_sent = [], []
+                    curr_source_text = []
+                    if len(answer) == max_sents and not to_shuffle:
+                        break
+                    continue
+                splitted = line.split("\t")
+                index = splitted[0]
+                if not index.isdigit() and index != "_":
+                    continue
+                word, lemma = splitted[word_column], splitted[lemma_column]
+                processed_word = process_word(word, to_lower=to_lower, append_case=append_case)
+                pos, tag = splitted[pos_column], (splitted[tag_column] if read_feats else "_")
+                if pos == "PUNCT" and word in POS_MAPPING:
+                    pos = POS_MAPPING[word]
+                if tag == "_":
+                    curr_tag = pos
+                else:
+                    curr_tag = "{},{}".format(pos, tag)
+                curr_source_sent.append(word)
+                curr_word_sent.append(processed_word)
+                curr_lemma_sent.append(lemma)
+                curr_tag_sent.append(curr_tag)
                 curr_source_text.append(line)
-                continue
-            if line == "":
-                if len(curr_word_sent) > 0:
-                    to_append = (curr_word_sent if read_only_words
-                                 else (curr_word_sent, curr_tag_sent))
-                    answer.append(to_append)
-                    source_answer.append(curr_source_sent)
-                    lemma_sents.append(curr_lemma_sent)
-                    source_texts.append(curr_source_text)
-                curr_tag_sent, curr_word_sent = [], []
-                curr_source_sent, curr_lemma_sent = [], []
-                curr_source_text = []
-                if len(answer) == max_sents and not to_shuffle:
-                    break
-                continue
-            splitted = line.split("\t")
-            index = splitted[0]
-            if not index.isdigit() and index != "_":
-                continue
-            word, lemma = splitted[word_column], splitted[lemma_column]
-            processed_word = process_word(word, to_lower=to_lower, append_case=append_case)
-            pos, tag = splitted[pos_column], (splitted[tag_column] if read_feats else "_")
-            if pos == "PUNCT" and word in POS_MAPPING:
-                pos = POS_MAPPING[word]
-            if tag == "_":
-                curr_tag = pos
-            else:
-                curr_tag = "{},{}".format(pos, tag)
-            curr_source_sent.append(word)
-            curr_word_sent.append(processed_word)
-            curr_lemma_sent.append(lemma)
-            curr_tag_sent.append(curr_tag)
-            curr_source_text.append(line)
-        if len(curr_tag_sent) > 0:
-            to_append = (curr_word_sent if read_only_words
-                         else (curr_word_sent, curr_tag_sent))
-            answer.append(to_append)
-            source_answer.append(curr_source_sent)
-            lemma_sents.append(curr_lemma_sent)
-            source_texts.append(curr_source_text)
+            if len(curr_tag_sent) > 0:
+                to_append = (curr_word_sent if read_only_words
+                             else (curr_word_sent, curr_tag_sent))
+                answer.append(to_append)
+                source_answer.append(curr_source_sent)
+                lemma_sents.append(curr_lemma_sent)
+                source_texts.append(curr_source_text)
     if not read_only_words and attach_tokens:
         for i, (word_sent, tag_sent) in enumerate(answer):
             for j, (word, tag) in enumerate(zip(word_sent, tag_sent)):

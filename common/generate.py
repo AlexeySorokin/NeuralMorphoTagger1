@@ -219,21 +219,26 @@ class TaggingDataGenerator:
 
 class DataGenerator:
 
+    POSITIONS_AS_CLASSES = 0
+
     def __init__(self, data, targets=None, additional_data=None,
+                 additional_targets=None, use_first_item_length=True,
                  yield_targets=True, yield_indexes=False,
                  symbols_number=None, classes_number=None,
-                 positions_are_classes=False,
                  additional_symbols_number=None,
+                 additional_classes_number=None,
                  batch_size=16, shuffle=False, nepochs=None):
         self.data = data
         self.targets = targets
         self.additional_data = additional_data or []
+        self.additional_targets = additional_targets or []
+        self.use_first_item_length = use_first_item_length
         self.yield_targets = yield_targets
         self.yield_indexes = yield_indexes
         self.symbols_number = symbols_number
         self.classes_number = classes_number
-        self.positions_are_classes = positions_are_classes
         self.additional_symbols_number = additional_symbols_number
+        self.additional_classes_number = additional_classes_number
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.nepochs = nepochs
@@ -256,9 +261,10 @@ class DataGenerator:
     def __iter__(self):
         return self
 
-    def _make_batch(self, data, indexes, classes_number=None):
+    def _make_batch(self, data, indexes, classes_number=None, use_length=True):
         first_item = np.array(data[0])
-        if first_item.ndim > 0:
+        if first_item.ndim > 0 and use_length:
+            # dtype = first_item.dtype if len(first_item) > 0 else int
             L = max(len(data[index]) for index in indexes)
             shape = (len(indexes), L) + np.shape(first_item)[1:]
             answer = np.zeros(shape=shape, dtype=first_item.dtype)
@@ -281,11 +287,18 @@ class DataGenerator:
                                  for elem, n in zip(self.additional_data, self.additional_symbols_number)]
         answer = [[curr_batch] + curr_additional_batch]
         if self.yield_targets and self.targets is not None:
-            if self.positions_are_classes:
+            classes_number = self.classes_number
+            if classes_number == self.POSITIONS_AS_CLASSES:
                 classes_number = curr_batch.shape[1]
-            else:
-                classes_number = self.classes_number
             curr_targets = self._make_batch(self.targets, curr_indexes, classes_number)
+            if len(self.additional_targets) > 0:
+                additional_classes_number = [n if n != self.POSITIONS_AS_CLASSES else curr_batch.shape[1]
+                                             for n in self.additional_classes_number]
+                curr_additional_targets = [
+                    self._make_batch(elem, curr_indexes, n)
+                    for elem, n in zip(self.additional_targets, additional_classes_number)
+                ]
+                curr_targets = [curr_targets] + curr_additional_targets
             answer.append(curr_targets)
         if self.yield_indexes:
             answer.append(curr_indexes)
