@@ -1,6 +1,7 @@
 from collections import defaultdict
 import inspect
 import itertools
+import ujson as json
 
 from common.common import *
 from common.read import make_UD_pos_and_tag, make_full_UD_tag
@@ -69,6 +70,11 @@ class Vocabulary:
                 if (not(attr.startswith("__") or inspect.ismethod(val))
                     and (attr[-1] != "_" or attr in ["symbols_", "symbol_codes_", "tokens_"]))}
         return info
+
+    def to_json(self, outfile):
+        with open(outfile, "w", encoding="utf8") as fout:
+            json.dump(self.jsonize(), fout)
+        return self
 
 
 def remove_token_field(x):
