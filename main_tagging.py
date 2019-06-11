@@ -15,7 +15,7 @@ from keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from common.generate import MultirunEarlyStopping
 from common.read import read_tags_infile, make_UD_pos_and_tag
 from neural_tagging.neural_tagging_1 import CharacterTagger, load_tagger
-from neural_LM import load_lm
+from neural_LM.neural_LM import load_lm
 from neural_tagging.misc import TagNormalizer, load_tag_normalizer
 from read import read_substitution_file
 
