@@ -1,6 +1,7 @@
 from collections import defaultdict
 import inspect
 import itertools
+import ujson as json
 
 from common.common import *
 from common.read import make_UD_pos_and_tag, make_full_UD_tag
@@ -32,13 +33,15 @@ class Vocabulary:
         self.min_count = min_count
         self.special_tokens = special_tokens or dict()
 
-    def train(self, text):
+    def train(self, text, from_sentences=True):
         symbols = defaultdict(int)
+        if from_sentences:
+            text = list(itertools.chain.from_iterable(text))
         for elem in text:
             if self.character:
-                curr_symbols = [symbol for x in elem for symbol in x]
-            else:
                 curr_symbols = elem
+            else:
+                curr_symbols = [elem]
             for x in curr_symbols:
                 symbols[x] += 1
         symbols = [x for x, count in symbols.items() if count >= self.min_count]
@@ -69,6 +72,11 @@ class Vocabulary:
                 if (not(attr.startswith("__") or inspect.ismethod(val))
                     and (attr[-1] != "_" or attr in ["symbols_", "symbol_codes_", "tokens_"]))}
         return info
+
+    def to_json(self, outfile):
+        with open(outfile, "w", encoding="utf8") as fout:
+            json.dump(self.jsonize(), fout)
+        return self
 
 
 def remove_token_field(x):
@@ -132,23 +140,29 @@ class FeatureVocabulary(Vocabulary):
                 answer.append(elem)
         return answer
 
-    def train(self, text, tokens=None):
+    def train(self, text, from_sentences=True, from_string=True, tokens=None):
         if self.use_tokens:
             if self.character:
                 raise ValueError("use_tokens cannot be True with character=True")
             text = remove_token_fields(text)
         else:
             tokens = None
-        text_to_train = [self._make_train_sent(sent) for sent in text]
-        super().train(text_to_train)
-        self._make_features(tokens=tokens)
+        if from_sentences:
+            text_to_train = [self._make_train_sent(sent) for sent in text]
+        else:
+            text_to_train = self._make_train_sent(text)
+        super().train(text_to_train, from_sentences=from_sentences)
+        self._make_features(tokens=tokens, from_string=from_string)
         return self
 
-    def _make_features(self, tokens=None):
+    def _make_features(self, tokens=None, from_string=True):
         labels = set()
         # first pass determines the set of feature-value pairs
         for symbol in self.symbols_[4:]:
-            symbol, feats = make_UD_pos_and_tag(symbol, return_mode="items")
+            if from_string:
+                symbol, feats = make_UD_pos_and_tag(symbol, return_mode="items")
+            else:
+                symbol, feats = symbol
             labels.add(symbol)
             for feature, value in feats:
                 if feature != "token":
@@ -162,7 +176,10 @@ class FeatureVocabulary(Vocabulary):
             if symbol in AUXILIARY:
                 codes = [i]
             else:
-                symbol, feats = make_UD_pos_and_tag(symbol, return_mode="items")
+                if from_string:
+                    symbol, feats = make_UD_pos_and_tag(symbol, return_mode="items")
+                else:
+                    symbol, feats = symbol
                 curr_labels = {symbol} | {"{}_{}_{}".format(symbol, *x) for x in feats}
                 codes = [self.symbol_labels_codes_[label] for label in curr_labels]
             self.symbol_matrix_[i, codes] = 1

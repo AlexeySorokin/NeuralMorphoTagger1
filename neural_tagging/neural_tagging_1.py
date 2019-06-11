@@ -19,23 +19,26 @@ from neural_LM.neural_LM import make_bucket_indexes
 from common.common import *
 from common.generate import TaggingDataGenerator, make_batch
 from neural_LM.neural_lm import load_lm
-from neural_tagging.cells import WeightedCombinationLayer, DistanceMatcher,\
+from neural_tagging.cells import WeightedCombinationLayer, DistanceMatcher, \
     TemporalDropout, leader_loss, positions_func
 from common.cells import build_word_cnn
 from neural_tagging.dictionary import read_dictionary
 from neural_tagging.vectorizers import load_vectorizer
+from low_resource_recover.guesser import TagGuesser
 
 BUCKET_SIZE = 32
 MAX_WORD_LENGTH = 30
 
 CASHED_INDEXES = dict()
 
+
 def load_tagger(infile):
     with open(infile, "r", encoding="utf8") as fin:
         json_data = json.load(fin)
     args = {key: value for key, value in json_data.items()
             if not (key.endswith("_") or key.endswith("callback") or
-                    key in ["dump_file", "lm_file", "vectorizer_save_data", "tag_vectorizer_save_data"])}
+                    key in ["dump_file", "lm_file", "vectorizer_save_data", "tag_vectorizer_save_data",
+                            "allow_multiple_labels", "decompose_labels"])}
     callbacks = []
     early_stopping_callback_data = json_data.get("early_stopping_callback")
     if early_stopping_callback_data is not None:
@@ -87,9 +90,9 @@ def load_tagger(infile):
     tagger.build()
     # model_file is relative to json file directory
     model_file = [os.path.join(os.path.dirname(infile), filename) for filename in json_data['dump_file']]
-    for curr_model_file, model in zip(model_file,  tagger.models_):
+    for curr_model_file, model in zip(model_file, tagger.models_):
         model.load_weights(curr_model_file)
-    
+
     return tagger
 
 
@@ -151,13 +154,13 @@ class CharacterTagger:
                  additional_inputs_number=0, additional_inputs_weight=0,
                  use_additional_symbol_features=False,
                  normalize_lm_embeddings=False, base_model_weight=0.25,
-                 word_rnn = "cnn", min_char_count=1, min_tag_count=1,
-                 char_embeddings_size=16, char_conv_layers = 1,
-                 char_window_size = 5, char_filters = None,
+                 word_rnn="cnn", min_char_count=1, min_tag_count=1,
+                 char_embeddings_size=16, char_conv_layers=1,
+                 char_window_size=5, char_filters=None,
                  total_char_filters=None, char_filter_multiple=25, max_window_filters=200,
-                 char_highway_layers = 1, conv_dropout = 0.0, highway_dropout = 0.0,
-                 intermediate_dropout = 0.0, word_dropout=0.0, lm_dropout=0.0,
-                 word_lstm_layers=1, word_lstm_units=128, lstm_dropout = 0.0,
+                 char_highway_layers=1, conv_dropout=0.0, highway_dropout=0.0,
+                 intermediate_dropout=0.0, word_dropout=0.0, lm_dropout=0.0,
+                 word_lstm_layers=1, word_lstm_units=128, lstm_dropout=0.0,
                  special_tags=None, use_nearest_neighbours=False,
                  use_rnn_for_weight_state=False, weight_state_rnn_units=64,
                  use_fusion=False, fusion_state_units=256, use_dimension_bias=False,
@@ -250,10 +253,11 @@ class CharacterTagger:
         for i, (data, dim) in enumerate(self.word_vectorizers):
             cls, params = eval(data["cls"]), data.get("params", dict())
             train_params = data.get("train_params", dict())
-            save_file = data["save_file"]
-            vectorizer = cls(**params).train(save_file=save_file, **train_params)
+            # save_file = data["save_file"]
+            # vectorizer = cls(**params).train(save_file=save_file, **train_params)
+            vectorizer = cls(**params).train(**train_params)
             self.word_vectorizers[i] = (vectorizer, dim)
-            self.vectorizer_save_data.append((data["cls"], save_file, dim))
+            # self.vectorizer_save_data.append((data["cls"], save_file, dim))
         if self.word_tag_vectorizers is None:
             self.word_tag_vectorizers = []
         self.tag_vectorizer_save_data = []
@@ -275,13 +279,13 @@ class CharacterTagger:
             if isinstance(model_file, str):
                 splitted = model_file.rsplit(".", maxsplit=1)
                 if len(splitted) == 1:
-                    answer = ["{}-{}".format(model_file, i+1) for i in range(self.models_number)]
+                    answer = ["{}-{}".format(model_file, i + 1) for i in range(self.models_number)]
                 else:
                     answer = ["{}-{}.{}".format(splitted[0], i + 1, splitted[1]) for i in range(self.models_number)]
         return answer
 
     def _make_batch_params_dict(self, params, code):
-        default_values_batch = {"first_epoch": 1, "last_epoch": self.nepochs, "decay_epoch": self.nepochs+1,
+        default_values_batch = {"first_epoch": 1, "last_epoch": self.nepochs, "decay_epoch": self.nepochs + 1,
                                 "initial_prob": 1.0, "decay": 0.0, "growth": 0.0}
         if self.transfer_warmup_epochs > 0:
             answer = copy.copy(default_values_batch)
@@ -312,7 +316,7 @@ class CharacterTagger:
         if batch_params is None:
             batch_params = dict()
         self.batch_params = [self._make_batch_params_dict(batch_params, code)
-                             for code in range(self.additional_inputs_number+1)]
+                             for code in range(self.additional_inputs_number + 1)]
         self._make_batching_probs()
         return
 
@@ -379,10 +383,10 @@ class CharacterTagger:
                         info["early_stopping_callback"] = {"patience": callback.patience,
                                                            "monitor": callback.monitor}
                     elif isinstance(callback, ModelCheckpoint):
-                        info["model_checkpoint_callback"] =\
+                        info["model_checkpoint_callback"] = \
                             {key: getattr(callback, key) for key in ["monitor", "filepath"]}
                     elif isinstance(callback, ReduceLROnPlateau):
-                        info["LR_callback"] =\
+                        info["LR_callback"] = \
                             {key: getattr(callback, key) for key in
                              ["monitor", "factor", "patience", "cooldown", "min_delta"]}
             elif attr.endswith("regularizer"):
@@ -461,7 +465,7 @@ class CharacterTagger:
             indexes_by_datasets = [[] for _ in range(self.additional_inputs_number + 1)]
             for i, code in enumerate(dataset_codes):
                 indexes_by_datasets[code].append(i)
-        lengths = [[len(data[i])+2 for i in elem] for elem in indexes_by_datasets]
+        lengths = [[len(data[i]) + 2 for i in elem] for elem in indexes_by_datasets]
         bucket_data = []
         for dataset_index, (curr_lengths, curr_indexes) in enumerate(zip(lengths, indexes_by_datasets)):
             if len(curr_indexes) == 0:
@@ -483,7 +487,7 @@ class CharacterTagger:
             bucket_length += int(self.additional_inputs_number > 0)
             for i in bucket_indexes:
                 sent = data[i] if not self.reverse else data[i][::-1]
-                length_func = lambda x: min(len(x), MAX_WORD_LENGTH)+2
+                length_func = lambda x: min(len(x), MAX_WORD_LENGTH) + 2
                 X[i] = [self._make_sent_vector(sent, dataset_codes[i],
                                                bucket_length=bucket_length,
                                                classes_number=self.symbols_number_)]
@@ -496,7 +500,7 @@ class CharacterTagger:
             if labels is not None and hasattr(self, "lm_"):
                 curr_bucket = np.array([X[i][-1] for i in bucket_indexes])
                 padding = np.full((curr_bucket.shape[0], 1), BEGIN, dtype=int)
-                curr_bucket = np.hstack((padding, curr_bucket[:,:-1]))
+                curr_bucket = np.hstack((padding, curr_bucket[:, :-1]))
                 # transforming indexes to features
                 curr_bucket = self.lm_.vocabulary_.symbol_matrix_[curr_bucket]
                 lm_probs = self.lm_.model_.predict(curr_bucket)
@@ -517,11 +521,17 @@ class CharacterTagger:
                     for j, word in enumerate(sent):
                         word = decode_word(word)
                         if word is not None:
-                            word_indexes = vectorizer[word]
+                            try:
+                                word_indexes = vectorizer[word]
+                            except:
+                                word_indexes = vectorizer(word)
                             if word_indexes is not None and len(word_indexes) > 0:
-                                for elem in word_indexes:
-                                    curr_sent_tags[j, elem] += 1.0
-                                curr_sent_tags /= len(word_indexes)
+                                if isinstance(word_indexes, list):
+                                    for elem in word_indexes:
+                                        curr_sent_tags[j, elem] += 1.0
+                                    curr_sent_tags[j] /= len(word_indexes)
+                                else:
+                                    curr_sent_tags[j] = word_indexes
                     X[index].insert(insert_pos, curr_sent_tags)
             insert_pos += len(self.word_vectorizers)
             for vectorizer in self.word_tag_vectorizers[::-1]:
@@ -570,24 +580,24 @@ class CharacterTagger:
             bucket_length = len(sent)
         if dataset_code is not None:
             dataset_code = self._additional_symbol_index(dataset_code)
-        output_shape = (bucket_length, MAX_WORD_LENGTH+2)
+        output_shape = (bucket_length, MAX_WORD_LENGTH + 2)
         # if classes_number is not None:
         #     output_shape += (classes_number,)
         answer = np.full(shape=output_shape, fill_value=PAD, dtype="int32")
-        answer[:len(sent),0] = BEGIN
+        answer[:len(sent), 0] = BEGIN
         if self.additional_inputs_number > 0:
-            answer[:len(sent),1] = dataset_code
+            answer[:len(sent), 1] = dataset_code
         lengths = [min(len(word), MAX_WORD_LENGTH - self.has_additional_inputs) for word in sent]
         for i, word in enumerate(sent):
             m = lengths[i]
             for j, x in enumerate(word[-m:], self.has_additional_inputs):
-                answer[i, j+1] = self.symbols_.toidx(x)
-            answer[i, self.has_additional_inputs+m+1] = END
+                answer[i, j + 1] = self.symbols_.toidx(x)
+            answer[i, self.has_additional_inputs + m + 1] = END
         answer = np.expand_dims(answer, -1).tolist()
         if classes_number is not None:
             if self.use_additional_symbol_features:
                 for i, L in enumerate(lengths):
-                    for j in range(2, L+2):
+                    for j in range(2, L + 2):
                         answer[i][j].append(dataset_code)
         return answer
 
@@ -688,7 +698,7 @@ class CharacterTagger:
         X_train, indexes_by_buckets, dataset_codes_by_buckets = self.transform(
             data, labels, buckets_number=10, dataset_codes=dataset_codes, join_datasets=False)
         if dev_data is not None:
-            X_dev, dev_indexes_by_buckets, _ =\
+            X_dev, dev_indexes_by_buckets, _ = \
                 self.transform(dev_data, dev_labels, bucket_size=BUCKET_SIZE, join_datasets=False)
         else:
             X_dev, dev_indexes_by_buckets = [None] * 2
@@ -790,11 +800,11 @@ class CharacterTagger:
                     if isinstance(callback, ModelCheckpoint):
                         callback.save_best_only = (dev_steps > 0)
                 model.fit_generator(
-                    train_gen, steps_per_epoch=train_steps, epochs=t+1,
+                    train_gen, steps_per_epoch=train_steps, epochs=t + 1,
                     callbacks=callbacks, validation_data=dev_gen,
                     validation_steps=dev_steps, initial_epoch=t, verbose=1)
-                if t+1 in checkpoints:
-                    model.save_weights(checkpoints[t+1][m])
+                if t + 1 in checkpoints:
+                    model.save_weights(checkpoints[t + 1][m])
                 if model.stop_training:
                     break
 
@@ -818,10 +828,10 @@ class CharacterTagger:
         return data
 
     def _make_batching_probs(self):
-        batching_probs = np.zeros(shape=(self.additional_inputs_number+1, self.nepochs), dtype=float)
+        batching_probs = np.zeros(shape=(self.additional_inputs_number + 1, self.nepochs), dtype=float)
         for code, batching_params in enumerate(self.batch_params):
-            start, end = batching_params["first_epoch"]-1, batching_params["last_epoch"]
-            decay = batching_params["decay_epoch"]-1
+            start, end = batching_params["first_epoch"] - 1, batching_params["last_epoch"]
+            decay = batching_params["decay_epoch"] - 1
             batching_probs[code, start: end] = batching_params["initial_prob"]
             growth = -batching_params["decay"] if batching_params["decay"] > 0 else batching_params["growth"]
             for epoch in range(decay, end):
@@ -852,12 +862,12 @@ class CharacterTagger:
             dataset_codes = [dataset_codes] * len(data)
         if self.morpho_dict is not None and not hasattr(self, "word_tag_mapper_"):
             self._make_word_tag_mapper(data)
-        X_test, indexes_by_buckets, datasets_by_buckets =\
+        X_test, indexes_by_buckets, datasets_by_buckets = \
             self.transform(data, labels=labels, dataset_codes=dataset_codes,
                            bucket_size=BUCKET_SIZE, join_buckets=False)
         answer, probs = [None] * len(data), [None] * len(data)
         basic_probs = [None] * len(data)
-        fields_number = len(X_test[0])-int(labels is not None)
+        fields_number = len(X_test[0]) - int(labels is not None)
         # for k, (curr_bucket, bucket_indexes) in enumerate(zip(X_test[::-1], indexes_by_buckets[::-1])):
         for k, bucket_indexes in enumerate(indexes_by_buckets[::-1]):
             X_curr = make_batch([X_test[i][:fields_number] for i in bucket_indexes], {0: self.symbols_number_})
@@ -865,7 +875,7 @@ class CharacterTagger:
             #           for j in range(len(X_test[0])-int(labels is not None))]
             if self.use_lm and labels is None:
                 if self.verbose > 0 and (k < 3 or k % 10 == 0):
-                    print("Bucket {} of {} predicting".format(k+1, len(indexes_by_buckets)))
+                    print("Bucket {} of {} predicting".format(k + 1, len(indexes_by_buckets)))
                 batch_answer = self.predict_on_batch(X_curr, beam_width)
                 bucket_labels = [x[0] for x in batch_answer[0]]
                 bucket_probs = [x[0] for x in batch_answer[1]]
@@ -880,7 +890,7 @@ class CharacterTagger:
                     bucket_basic_probs = np.mean(bucket_probs, axis=1)
                 bucket_probs = np.mean(bucket_probs, axis=0)
                 bucket_labels = np.argmax(bucket_probs, axis=-1)
-            for curr_labels, curr_probs, curr_basic_probs, index in\
+            for curr_labels, curr_probs, curr_basic_probs, index in \
                     zip(bucket_labels, bucket_probs, bucket_basic_probs, bucket_indexes):
                 curr_labels = curr_labels[:len(data[index])]
                 curr_labels = [self.tags_.fromidx(label) for label in curr_labels]
@@ -896,7 +906,7 @@ class CharacterTagger:
         probs, basic_probs = [None] * len(data), [None] * len(data)
         for k, (X_curr, bucket_indexes) in enumerate(zip(X_test[::-1], indexes_by_buckets[::-1])):
             X_curr = [np.array([X_test[i][j] for i in bucket_indexes])
-                      for j in range(len(X_test[0])-1)]
+                      for j in range(len(X_test[0]) - 1)]
             y_curr = [np.array(X_test[i][-1]) for i in bucket_indexes]
             bucket_probs = [model.predict(X_curr, batch_size=256) for model in self.models_]
             if self.use_lm:
@@ -906,7 +916,7 @@ class CharacterTagger:
             else:
                 bucket_basic_probs = [None] * len(bucket_indexes)
             bucket_probs = np.mean(bucket_probs, axis=0)
-            for curr_labels, curr_probs, curr_basic_probs, index in\
+            for curr_labels, curr_probs, curr_basic_probs, index in \
                     zip(y_curr, bucket_probs, bucket_basic_probs, bucket_indexes):
                 L = len(data[index])
                 probs[index] = curr_probs[np.arange(L), curr_labels[:L]]
@@ -926,37 +936,39 @@ class CharacterTagger:
         is_active, active_count = np.zeros(dtype=bool, shape=(M,)), m
         is_completed = np.zeros(dtype=bool, shape=(M,))
         is_active[np.arange(0, M, beam_width)] = True
-        lm_inputs = np.full(shape=(M, L+1), fill_value=BEGIN, dtype=np.int32)
+        lm_inputs = np.full(shape=(M, L + 1), fill_value=BEGIN, dtype=np.int32)
         lm_inputs = self.tags_.symbol_matrix_[lm_inputs]
+
         # определяем функцию удлинения входа для языковой модели
         def lm_inputs_func(old, new, i, matrix):
-            return np.concatenate([old[:i+1], [matrix[new]], old[i+2:]])
+            return np.concatenate([old[:i + 1], [matrix[new]], old[i + 2:]])
+
         for i in range(L):
             for j, start in enumerate(range(0, M, beam_width)):
                 if np.max(X[0][j, i]) == 0 and is_active[start]:
                     # complete the sequences not completed yet
                     # is_active[start] checks that the group has not yet been completed
-                    is_completed[start:start+beam_width] = is_active[start:start+beam_width]
-                    is_active[start:start+beam_width] = False
+                    is_completed[start:start + beam_width] = is_active[start:start + beam_width]
+                    is_active[start:start + beam_width] = False
             if not any(is_active):
                 break
-            active_lm_inputs = lm_inputs[is_active,:i+1]
+            active_lm_inputs = lm_inputs[is_active, :i + 1]
             # predicting language model probabilities and states
             if not self.use_fusion:
                 lm_probs, lm_states = self.lm_.output_and_state_func_([active_lm_inputs, 0])
             else:
                 lm_states = self.lm_.hidden_state_func_([active_lm_inputs, 0])[0]
             # keeping only active basic outputs
-            active_basic_outputs = [elem[is_active,i:i+1] for elem in basic_outputs]
+            active_basic_outputs = [elem[is_active, i:i + 1] for elem in basic_outputs]
             if self.use_fusion:
-                final_layer_inputs = active_basic_outputs + [lm_states[:,-1:]]
+                final_layer_inputs = active_basic_outputs + [lm_states[:, -1:]]
             else:
-                final_layer_inputs = active_basic_outputs + [lm_probs[:,-1:], lm_states[:,-1:]]
-            final_layer_outputs = self._decoder_(final_layer_inputs + [0])[0][:,0]
+                final_layer_inputs = active_basic_outputs + [lm_probs[:, -1:], lm_states[:, -1:]]
+            final_layer_outputs = self._decoder_(final_layer_inputs + [0])[0][:, 0]
             hypotheses_by_groups = [[] for _ in range(m)]
             if beam_width == 1:
                 curr_output_tags = np.argmax(final_layer_outputs, axis=-1)
-                for r, (j, curr_probs, curr_basic_probs, index) in\
+                for r, (j, curr_probs, curr_basic_probs, index) in \
                         enumerate(zip(np.nonzero(is_active)[0], final_layer_outputs,
                                       active_basic_outputs[0], curr_output_tags)):
                     new_score = partial_scores[j] - np.log10(curr_probs[index])
@@ -984,10 +996,10 @@ class CharacterTagger:
                         hyp = (j, index, new_score, curr_probs[index], curr_basic_probs[0, index])
                         hypotheses_by_groups[group_index].append(hyp)
             for j, curr_hypotheses in enumerate(hypotheses_by_groups):
-                curr_hypotheses = sorted(curr_hypotheses, key=(lambda x:x[2]))[:beam_width]
+                curr_hypotheses = sorted(curr_hypotheses, key=(lambda x: x[2]))[:beam_width]
                 group_start = j * beam_width
-                is_active[group_start:group_start+beam_width] = False
-                group_indexes = np.arange(group_start, group_start+len(curr_hypotheses))
+                is_active[group_start:group_start + beam_width] = False
+                group_indexes = np.arange(group_start, group_start + len(curr_hypotheses))
                 extend_history(tags, curr_hypotheses, group_indexes, pos=1)
                 extend_history(probs, curr_hypotheses, group_indexes, pos=3)
                 extend_history(basic_probs, curr_hypotheses, group_indexes, pos=4)
@@ -1000,15 +1012,15 @@ class CharacterTagger:
         tags_by_groups, probs_by_groups, basic_probs_by_groups = [], [], []
         for group_start in range(0, M, beam_width):
             # приводим к списку, чтобы иметь возможность сортировать
-            active_indexes_for_group = list(np.where(is_completed[group_start:group_start+beam_width])[0])
-            tags_by_groups.append([tags[group_start+i] for i in active_indexes_for_group])
-            curr_group_probs = [np.array(probs[group_start+i])
+            active_indexes_for_group = list(np.where(is_completed[group_start:group_start + beam_width])[0])
+            tags_by_groups.append([tags[group_start + i] for i in active_indexes_for_group])
+            curr_group_probs = [np.array(probs[group_start + i])
                                 for i in active_indexes_for_group]
-            curr_basic_group_probs = [np.array(basic_probs[group_start+i])
+            curr_basic_group_probs = [np.array(basic_probs[group_start + i])
                                       for i in active_indexes_for_group]
             if not return_log:
                 curr_group_probs = [np.power(10.0, -elem) for elem in curr_group_probs]
-                curr_basic_group_probs =\
+                curr_basic_group_probs = \
                     [np.power(10.0, -elem) for elem in curr_basic_group_probs]
             probs_by_groups.append(curr_group_probs)
             basic_probs_by_groups.append(curr_basic_group_probs)
@@ -1027,7 +1039,7 @@ class CharacterTagger:
             lm_index = lm.vocabulary_.toidx(tag)
             self.tag_embeddings_[i] = embedding_weights[lm_index]
         if self.normalize_lm_embeddings:
-            self.tag_embeddings_ /= np.linalg.norm(self.tag_embeddings_, axis=1)[:,None]
+            self.tag_embeddings_ /= np.linalg.norm(self.tag_embeddings_, axis=1)[:, None]
         return self
 
     def build(self):
@@ -1046,7 +1058,7 @@ class CharacterTagger:
 
     def _build_model(self):
         # word_inputs = kl.Input(shape=(None, MAX_WORD_LENGTH+2), dtype="int32")
-        word_inputs = kl.Input(shape=(None, MAX_WORD_LENGTH+2, self.symbols_number_), dtype="int32")
+        word_inputs = kl.Input(shape=(None, MAX_WORD_LENGTH + 2, self.symbols_number_), dtype="int32")
         inputs, basic_inputs = [word_inputs], [word_inputs]
         word_outputs = build_word_cnn(word_inputs, char_embeddings_size=self.char_embeddings_size,
                                       char_window_size=self.char_window_size, char_filters=self.char_filters,
@@ -1124,18 +1136,28 @@ class CharacterTagger:
             basic_model, decoder = None, None
         return model, basic_model, decoder
 
-
-
     def _build_basic_network(self, word_outputs, additional_embeddings=None):
         """
         Creates the basic network architecture,
         transforming word embeddings to intermediate outputs
         """
         lstm_outputs = word_outputs
+        if len(self.word_tag_vectorizers) > 0:
+            # pre_outputs = kl.TimeDistributed(kl.Dense(self.tags_number_))(lstm_outputs)
+            # for elem in additional_embeddings:
+            #     pre_outputs = WeightedSum()([pre_outputs, elem])
+            to_concatenate = [lstm_outputs]
+            for embedding in additional_embeddings:
+                if self.embed_additional_features:
+                    embedding = kl.Dense(self.tags_number_, kernel_initializer=kint.identity(),
+                                         bias_initializer="zeros")(embedding)
+                    embedding = kl.Dropout(0.2)(embedding)
+                to_concatenate.append(embedding)
+            lstm_outputs = kl.Concatenate()(to_concatenate)
         for j in range(self.word_lstm_layers - 1):
             lstm_outputs = kl.Bidirectional(
                 kl.LSTM(self.word_lstm_units[j], return_sequences=True,
-                        dropout=self.lstm_dropout, name="word_lstm_{}".format(j+1)))(lstm_outputs)
+                        dropout=self.lstm_dropout, name="word_lstm_{}".format(j + 1)))(lstm_outputs)
         if self.word_lstm_layers > 0:
             lstm_outputs = kl.Bidirectional(
                 kl.LSTM(self.word_lstm_units[-1], return_sequences=True, dropout=self.lstm_dropout,
@@ -1144,18 +1166,18 @@ class CharacterTagger:
             pre_outputs = self.tag_embeddings_output_layer(lstm_outputs)
         else:
             if len(self.word_tag_vectorizers) > 0:
-                # pre_outputs = kl.TimeDistributed(kl.Dense(self.tags_number_))(lstm_outputs)
+                pre_outputs = kl.TimeDistributed(kl.Dense(self.tags_number_))(lstm_outputs)
                 # for elem in additional_embeddings:
                 #     pre_outputs = WeightedSum()([pre_outputs, elem])
                 to_concatenate = [lstm_outputs]
-                for embedding in additional_embeddings:
-                    if self.embed_additional_features:
-                        embedding = kl.Dense(self.tags_number_, kernel_initializer=kint.identity(),
-                                              bias_initializer="zeros")(embedding)
-                        embedding = kl.Dropout(0.2)(embedding)
-                    to_concatenate.append(embedding)
-                pre_outputs = kl.Concatenate()(to_concatenate)
-                # pre_outputs = kl.TimeDistributed(kl.Activation(activation="softmax"), name="p")(pre_outputs)
+                # for embedding in additional_embeddings:
+                #     if self.embed_additional_features:
+                #         embedding = kl.Dense(self.tags_number_, kernel_initializer=kint.identity(),
+                #                              bias_initializer="zeros")(embedding)
+                #         embedding = kl.Dropout(0.2)(embedding)
+                #     to_concatenate.append(embedding)
+                # pre_outputs = kl.Concatenate()(to_concatenate)
+                # # pre_outputs = kl.TimeDistributed(kl.Activation(activation="softmax"), name="p")(pre_outputs)
                 output_layer = kl.Dense(self.tags_number_, activation="softmax",
                                         activity_regularizer=self.regularizer)
                 pre_outputs = kl.TimeDistributed(output_layer, name="p")(pre_outputs)
@@ -1193,8 +1215,9 @@ class CharacterTagger:
 
     def _make_class_matrix(self):
         matrix = np.identity(n=self.tags_number_)
-        matrix[len(AUXILIARY):,UNKNOWN] = 1
+        matrix[len(AUXILIARY):, UNKNOWN] = 1
         return matrix
+
 
 def extend_history(histories, hyps, indexes, start=0, pos=None,
                    history_pos=0, value=None, func="append", **kwargs):
@@ -1209,4 +1232,4 @@ def extend_history(histories, hyps, indexes, start=0, pos=None,
     group_histories = [func(histories[elem[history_pos]], value, **kwargs)
                        for elem, value in zip(hyps, to_append)]
     for i, index in enumerate(indexes):
-        histories[start+index] = group_histories[i]
+        histories[start + index] = group_histories[i]

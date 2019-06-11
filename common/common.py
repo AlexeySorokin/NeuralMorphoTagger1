@@ -6,6 +6,7 @@ required by NeuralLM, but possibly useful for other modules
 import numpy as np
 
 import keras.backend as kb
+import tensorflow as tf
 
 if kb.backend() == "tensorflow":
     from common.common_tensorflow import generate_future_mask
@@ -140,6 +141,19 @@ def distributed_dot_softmax(M, H):
     if not hasattr(answer, "_keras_shape") and hasattr(M, "_keras_shape"):
         answer._keras_shape = M._keras_shape[:-1]
     return answer
+
+
+def gather_indexes(A, B):
+    """
+    Returns a tensor C such that C[i, j] = A[i, B[i, j]]
+    :param A:
+    :param B:
+    :return:
+    """
+    first_dim_indexes = kb.expand_dims(tf.range(tf.shape(B)[0]), -1)
+    first_dim_indexes = kb.tile(first_dim_indexes, [1, tf.shape(B)[1]])
+    indexes = tf.stack([first_dim_indexes, B], axis=-1)
+    return tf.gather_nd(A, indexes)
 
 
 

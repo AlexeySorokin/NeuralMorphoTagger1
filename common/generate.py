@@ -220,9 +220,12 @@ class TaggingDataGenerator:
 class DataGenerator:
 
     POSITIONS_AS_CLASSES = 0
+    POSITION_AS_PADDING = -1
 
-    def __init__(self, data, targets=None, additional_data=None,
-                 pad_additional_data=True, additional_targets=None,
+    def __init__(self, data, targets=None, embedder=None, padding=0,
+                 additional_data=None, pad_additional_data=True,
+                 additional_padding=None, additional_targets=None,
+                 target_padding=0, additional_target_paddings=None,
                  yield_targets=True, yield_indexes=False,
                  symbols_number=None, classes_number=None,
                  additional_symbols_number=None,
@@ -230,9 +233,14 @@ class DataGenerator:
                  batch_size=16, shuffle=False, nepochs=None):
         self.data = data
         self.targets = targets
+        self.embedder = embedder
+        self.padding = padding
         self.additional_data = additional_data or []
         self.pad_additional_data = pad_additional_data
+        self.additional_padding = additional_padding
         self.additional_targets = additional_targets or []
+        self.target_padding = target_padding
+        self.additional_target_paddings = additional_target_paddings
         self.yield_targets = yield_targets
         self.yield_indexes = yield_indexes
         self.symbols_number = symbols_number
@@ -249,6 +257,10 @@ class DataGenerator:
             self.additional_symbols_number = [self.additional_symbols_number] * len(self.additional_data)
         if isinstance(self.pad_additional_data, bool):
             self.pad_additional_data = [self.pad_additional_data] * len(self.additional_data)
+        if self.additional_padding is None:
+            self.additional_padding = [None] * len(self.additional_data)
+        if self.additional_target_paddings is None:
+            self.additional_target_paddings = [None] * len(self.additional_targets)
         self.indexes = []
         ordered_indexes = np.argsort([len(x) for x in self.data])
         for i in range(0, len(ordered_indexes), self.batch_size):
@@ -263,15 +275,27 @@ class DataGenerator:
     def __iter__(self):
         return self
 
-    def _make_batch(self, data, indexes, classes_number=None, use_length=True):
+    def _make_batch(self, data, indexes, classes_number=None,
+                    pad_value=0, use_length=True, use_embedder=True):
         first_item = np.array(data[0])
         if first_item.ndim > 0 and use_length:
+            curr_data = [data[index] for index in indexes]
+            if self.embedder is not None and use_embedder:
+                curr_data = self.embedder(curr_data)
             # dtype = first_item.dtype if len(first_item) > 0 else int
-            L = max(len(data[index]) for index in indexes)
-            shape = (len(indexes), L) + np.shape(first_item)[1:]
-            answer = np.zeros(shape=shape, dtype=first_item.dtype)
-            for i, index in enumerate(indexes):
-                answer[i, :len(data[index])] = data[index]
+            L = max(len(elem) for elem in curr_data)
+            first_item = np.array(curr_data[0])
+            shape = (len(indexes), L) + np.shape(curr_data[0])[1:]
+            answer = np.ones(shape=shape, dtype=first_item.dtype)
+            if pad_value == self.POSITION_AS_PADDING:
+                answer = np.cumsum(answer, axis=-1) - 1
+            else:
+                answer *= pad_value
+            for i, elem in enumerate(curr_data):
+                answer[i, :len(elem)] = elem
+            # else:
+            #     shape = (len(indexes), L) + np.shape(first_item)[1:] + (self.embedder.dim,)
+            #     answer = np.zeros(shape=shape, dtype=first_item.dtype)
         else:
             answer = np.array([data[i] for i in indexes], dtype=first_item.dtype)
         if classes_number is not None:
@@ -284,21 +308,25 @@ class DataGenerator:
         if self.shuffle and self.step == 0:
             np.random.shuffle(self.indexes)
         curr_indexes = self.indexes[self.step]
-        curr_batch = self._make_batch(self.data, curr_indexes, self.symbols_number)
-        curr_additional_batch = [self._make_batch(elem, curr_indexes, n)
-                                 for elem, n in zip(self.additional_data, self.additional_symbols_number)]
+        curr_batch = self._make_batch(self.data, curr_indexes, self.symbols_number, pad_value=self.target_padding)
+        curr_additional_batch = [self._make_batch(elem, curr_indexes, n, pad_value=pad_value, use_embedder=False)
+                                 for elem, n, pad_value in zip(self.additional_data,
+                                                               self.additional_symbols_number,
+                                                               self.additional_padding)]
         answer = [[curr_batch] + curr_additional_batch]
         if self.yield_targets and self.targets is not None:
             classes_number = self.classes_number
             if classes_number == self.POSITIONS_AS_CLASSES:
                 classes_number = curr_batch.shape[1]
-            curr_targets = self._make_batch(self.targets, curr_indexes, classes_number)
+            curr_targets = self._make_batch(self.targets, curr_indexes, classes_number,
+                                            use_embedder=False, pad_value=self.target_padding)
             if len(self.additional_targets) > 0:
                 additional_classes_number = [n if n != self.POSITIONS_AS_CLASSES else curr_batch.shape[1]
                                              for n in self.additional_classes_number]
                 curr_additional_targets = [
-                    self._make_batch(elem, curr_indexes, n)
-                    for elem, n in zip(self.additional_targets, additional_classes_number)
+                    self._make_batch(elem, curr_indexes, n, pad_value=pad_value, use_embedder=False)
+                    for elem, n, pad_value in zip(self.additional_targets, additional_classes_number,
+                                                  self.additional_target_paddings)
                 ]
                 curr_targets = [curr_targets] + curr_additional_targets
             answer.append(curr_targets)

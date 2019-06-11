@@ -1,5 +1,9 @@
+import numpy as np
+
 from keras import layers as kl, activations as kact, initializers as kinit, backend as kb
 from keras.engine import InputSpec
+import keras.initializers as kint
+
 
 
 class Highway(kl.Layer):
@@ -81,3 +85,33 @@ def build_word_cnn(inputs, char_embeddings_size=16, char_window_size=5,
     else:
         highway_output = highway_input
     return highway_output
+
+
+class BiaffineAttention(kl.Layer):
+
+    def __init__(self, input_dim, **kwargs):
+        if 'input_shape' not in kwargs:
+            kwargs['input_shape'] = (input_dim,)
+        super(BiaffineAttention, self).__init__(**kwargs)
+        self.input_dim = input_dim
+        self.kernel_initializer = kint.Identity(gain=1.0 / np.sqrt(input_dim))
+        self.input_spec = [InputSpec(min_ndim=2, axes={-1: self.input_dim}),
+                           InputSpec(min_ndim=2, axes={-1: self.input_dim})]
+
+    def build(self, input_shape):
+        assert len(input_shape) == 2
+        assert input_shape[0] == input_shape[1]
+
+        self.kernel = self.add_weight(shape=(self.input_dim, self.input_dim),
+                                      initializer=self.kernel_initializer,
+                                      name='kernel')
+        self.built = True
+
+    def call(self, inputs, **kwargs):
+        first = kb.dot(inputs[0], self.kernel) # sum_i a_ij x_ri
+        answer = kb.batch_dot(first, inputs[1], axes=[2, 2])
+        return answer
+
+    def compute_output_shape(self, input_shape):
+        input_shape = input_shape[0]
+        return tuple(input_shape[:-1]) + (input_shape[-2],)
