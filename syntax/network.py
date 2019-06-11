@@ -184,7 +184,7 @@ class SyntacticParser:
             batch_probs = self.dep_model.predict(batch)
             batch_labels = np.argmax(batch_probs, axis=-1)
             for i, index in enumerate(indexes):
-                L = len(sents[index])
+                L = len(data[index])
                 curr_labels = batch_labels[i][1:L - 1]
                 answer[index] = [self.dep_vocab.symbols_[elem] for elem in curr_labels]
         return answer
