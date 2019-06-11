@@ -34,13 +34,36 @@ def process_word(word, to_lower=False, append_case=None):
     return tuple(answer)
 
 
+def read_UD_file(infile):
+    sents, curr_sent = [], []
+    with open(infile, "r", encoding="utf8") as fin:
+        for line in fin:
+            line = line.strip()
+            if line.startswith("#"):
+                continue
+            if line == "":
+                if len(curr_sent) > 0:
+                    sents.append(curr_sent)
+                curr_sent = []
+                continue
+            splitted = line.split("\t")
+            index = splitted[0]
+            if not index.isdigit():
+                continue
+            curr_sent.append(splitted)
+        if len(curr_sent) > 0:
+            sents.append(curr_sent)
+    return sents
+
+
 def read_tags_infile(infiles, read_words=False, to_lower=False,
                      append_case="first", wrap=False, attach_tokens=False,
                      word_column=WORD_COLUMN, pos_column=POS_COLUMN,
                      tag_column=TAG_COLUMN, lemma_column=LEMMA_COLUMN,
                      read_only_words=False, return_source_words=False,
                      return_lemmas=False, return_source_text=False,
-                     read_feats=True, max_sents=-1, to_shuffle=False):
+                     read_feats=True, max_sents=-1, to_shuffle=False,
+                     to_process_word=True):
     answer, curr_tag_sent, curr_word_sent = [], [], []
     source_answer, curr_source_sent = [], []
     lemma_sents, curr_lemma_sent = [], []
@@ -74,7 +97,10 @@ def read_tags_infile(infiles, read_words=False, to_lower=False,
                 if not index.isdigit() and index != "_":
                     continue
                 word, lemma = splitted[word_column], splitted[lemma_column]
-                processed_word = process_word(word, to_lower=to_lower, append_case=append_case)
+                if to_process_word:
+                    processed_word = process_word(word, to_lower=to_lower, append_case=append_case)
+                else:
+                    processed_word = word
                 pos, tag = splitted[pos_column], (splitted[tag_column] if read_feats else "_")
                 if pos == "PUNCT" and word in POS_MAPPING:
                     pos = POS_MAPPING[word]
@@ -125,7 +151,7 @@ def read_tags_infile(infiles, read_words=False, to_lower=False,
 
 def read_syntax_infile(infile, to_lower=False, append_case="first",
                        word_column=WORD_COLUMN, head_column=HEAD_COLUMN,
-                       dep_column=DEP_COLUMN,
+                       dep_column=DEP_COLUMN, to_process_word=True,
                        max_sents=-1, to_shuffle=False):
     """
     Parameters
@@ -159,7 +185,10 @@ def read_syntax_infile(infile, to_lower=False, append_case="first",
             if not index.isdigit() and index != "_":
                 continue
             word = splitted[word_column]
-            processed_word = process_word(word, to_lower=to_lower, append_case=append_case)
+            if to_process_word:
+                processed_word = process_word(word, to_lower=to_lower, append_case=append_case)
+            else:
+                processed_word = word
             # pos, tag = splitted[pos_column], (splitted[tag_column] if read_feats else "_")
             # if pos == "PUNCT" and word in POS_MAPPING:
             #     pos = POS_MAPPING[word]
