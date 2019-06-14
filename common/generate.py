@@ -290,7 +290,11 @@ class DataGenerator:
             if pad_value == self.POSITION_AS_PADDING:
                 answer = np.cumsum(answer, axis=-1) - 1
             else:
-                answer *= pad_value
+                try:
+                    answer *= pad_value
+                except:
+                    x = 1
+                    raise ValueError("")
             for i, elem in enumerate(curr_data):
                 answer[i, :len(elem)] = elem
             # else:
@@ -308,7 +312,7 @@ class DataGenerator:
         if self.shuffle and self.step == 0:
             np.random.shuffle(self.indexes)
         curr_indexes = self.indexes[self.step]
-        curr_batch = self._make_batch(self.data, curr_indexes, self.symbols_number, pad_value=self.target_padding)
+        curr_batch = self._make_batch(self.data, curr_indexes, self.symbols_number, pad_value=self.padding)
         curr_additional_batch = [self._make_batch(elem, curr_indexes, n, pad_value=pad_value, use_embedder=False)
                                  for elem, n, pad_value in zip(self.additional_data,
                                                                self.additional_symbols_number,

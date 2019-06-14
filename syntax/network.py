@@ -73,11 +73,13 @@ class StrangeSyntacticParser:
 
     MAX_WORD_LENGTH = 30
 
-    def __init__(self, embedder=None, use_tags=False,
+    def __init__(self, use_joint_model=True, embedder=None, use_tags=False,
                  use_char_model=False, max_word_length=MAX_WORD_LENGTH,
                  head_model_params=None, dep_model_params=None,
                  head_train_params=None, dep_train_params=None,
+                 model_params=None, train_params=None,
                  char_layer_params=None):
+        self.use_joint_model = use_joint_model
         self.embedder = embedder
         self.use_tags = use_tags
         self.use_char_model = use_char_model
@@ -86,9 +88,23 @@ class StrangeSyntacticParser:
         self.dep_model_params = dep_model_params or dict()
         self.head_train_params = head_train_params or dict()
         self.dep_train_params = dep_train_params or dict()
+        self.model_params = model_params or dict()
+        self.train_params = train_params or dict()
         self.char_layer_params = char_layer_params or dict()
         self.head_model_params["char_layer_params"] = self.char_layer_params
         self.dep_model_params["char_layer_params"] = self.char_layer_params
+        if self.embedder is None and not self.use_char_model and not self.use_tags:
+            raise ValueError("")
+
+    @property
+    def first_input_index(self):
+        return 0 if self.embedder is not None else 1 if self.use_char_model else 2
+
+    @property
+    def active_input_indexes(self):
+        inputs = [self.embedder is not None, self.use_char_model, self.use_tags]
+        answer = [i for i, x in enumerate(inputs) if x]
+        return answer
 
     def _initialize_position_embeddings(self):
         new_weight = np.eye(128, dtype="float") / np.sqrt(128)
@@ -168,7 +184,6 @@ class StrangeSyntacticParser:
         print(model.summary())
         return model
 
-
     def build_Dozat_network(self, state_units=256, dropout=0.2,
                             lstm_layers=1, lstm_size=128, lstm_dropout=0.2,
                             char_layer_params=None, tag_embeddings_size=64):
@@ -200,7 +215,7 @@ class StrangeSyntacticParser:
         head_encodings = kl.Dropout(dropout)(kl.Dense(state_units, activation="relu")(lstm_output))
         dep_encodings = kl.Dropout(dropout)(kl.Dense(state_units, activation="relu")(lstm_output))
         head_similarities = BiaffineAttention(state_units, use_first_bias=True)([dep_encodings, head_encodings])
-        head_probs = kl.Softmax(naem="heads", axis=-1)(head_similarities)
+        head_probs = kl.Softmax(name="heads", axis=-1)(head_similarities)
         # selecting each word dependency type (with gold heads)
         dep_inputs = kl.Input(shape=(None,), dtype="int32")
         head_inputs = kl.Input(shape=(None,), dtype="int32")
@@ -209,15 +224,17 @@ class StrangeSyntacticParser:
         head_embeddings = kl.Lambda(gather_indexes, arguments={"B": head_inputs})(lstm_output)
         dep_encodings = kl.Dropout(dropout)(kl.Dense(state_units, activation="relu")(dep_embeddings))
         head_encodings = kl.Dropout(dropout)(kl.Dense(state_units, activation="relu")(head_embeddings))
-        dep_probs = BiaffineLayer(state_units, self.dep_vocab.symbols_number_,
+        dep_probs = BiaffineLayer(self.dep_vocab.symbols_number_, state_units,
                                   name="deps", use_first_bias=True, use_second_bias=True,
-                                  use_label_bias=True, activation="softmax")([dep_embeddings, head_embeddings])
+                                  use_label_bias=True, activation="softmax")([dep_encodings, head_encodings])
         outputs = [head_probs, dep_probs]
         model = Model(inputs, outputs)
         model.compile(optimizer=kopt.Adam(clipnorm=5.0), loss=["categorical_crossentropy"] * 2,
-                      metrics=["accuracy", "accuracy"])
+                      loss_weights=[1.0, 1.0], metrics=["accuracy"])
+        head_model = kb.Function(inputs[:-2] + [kb.learning_phase()], [head_probs])
+        dep_model = kb.Function(inputs + [kb.learning_phase()], [dep_probs])
         print(model.summary())
-        return model
+        return model, head_model, dep_model
 
     def _recode(self, sent):
         if isinstance(sent[0], str):
@@ -264,10 +281,56 @@ class StrangeSyntacticParser:
         else:
             dev_sent_data, dev_heads, dev_deps, dev_tag_data = None, None, None, None
         self.dep_vocab = Vocabulary(min_count=3).train(deps)
-        self.train_head_model(sent_data, heads, dev_sent_data, dev_heads,
-                              tags=tag_data, dev_tags=dev_tag_data, **self.head_train_params)
-        self.train_dep_model(sent_data, heads, deps, dev_sent_data, dev_heads, dev_deps,
-                             tags=tag_data, dev_tags=dev_tag_data, **self.dep_train_params)
+        if self.use_joint_model:
+            self.train_joint_model(sents, sent_data, heads, deps,
+                                   dev_sents, dev_sent_data, dev_heads, dev_deps,
+                                   tags=tag_data, dev_tags=dev_tag_data, **self.train_params)
+        else:
+            self.train_head_model(sent_data, heads, dev_sent_data, dev_heads,
+                                  tags=tag_data, dev_tags=dev_tag_data, **self.head_train_params)
+            self.train_dep_model(sent_data, heads, deps, dev_sent_data, dev_heads, dev_deps,
+                                 tags=tag_data, dev_tags=dev_tag_data, **self.dep_train_params)
+        return self
+
+    def train_joint_model(self, sent_data, sents, heads, deps,
+                          dev_sent_data, dev_sents, dev_heads, dev_deps,
+                          tags=None, dev_tags=None,
+                          nepochs=3, batch_size=16, patience=1):
+        self.model, self.head_model, self.dep_model = self.build_Dozat_network(**self.model_params)
+        gen_params = {"embedder": self.embedder, "batch_size": batch_size,
+                      "classes_number": DataGenerator.POSITIONS_AS_CLASSES,
+                      "additional_classes_number": [self.dep_vocab.symbols_number_],
+                      "additional_target_paddings": [PAD]}
+        dep_indexes, head_indexes, dep_codes = \
+            make_indexes_for_syntax(heads, deps, dep_vocab=self.dep_vocab, to_pad=False)
+        # все входные данные
+        data = [sent_data, sents, tags, dep_indexes, head_indexes]
+        paddings = [PAD] * 3 + [DataGenerator.POSITION_AS_PADDING] * 2
+        additional_input_indexes = self.active_input_indexes[1:] + [3, 4]
+        # используемые входные данные
+        additional_data = [data[i] for i in additional_input_indexes]
+        gen_params["additional_padding"] = [paddings[i] for i in additional_input_indexes]
+        train_gen = DataGenerator(data[self.first_input_index], targets=heads,
+                                  additional_data=additional_data,  additional_targets=[dep_codes],
+                                  **gen_params)
+        if dev_sent_data is not None:
+            dev_dep_indexes, dev_head_indexes, dev_dep_codes = \
+                make_indexes_for_syntax(dev_heads, dev_deps, dep_vocab=self.dep_vocab, to_pad=False)
+            dev_data = [dev_sent_data, dev_sents, dev_tags, dev_dep_indexes, dev_head_indexes]
+            additional_dev_data = [dev_data[i] for i in additional_input_indexes]
+            dev_gen = DataGenerator(dev_data[self.first_input_index], targets=dev_heads,
+                                    additional_data=additional_dev_data,
+                                    additional_targets=[dev_dep_codes], shuffle=False, **gen_params)
+            validation_steps = dev_gen.steps_per_epoch
+        else:
+            dev_gen, validation_steps = None, None
+        callbacks = []
+        if patience >= 0:
+            callbacks.append(EarlyStopping(monitor="val_heads_acc", restore_best_weights=True, patience=patience))
+        self.model.fit_generator(train_gen, train_gen.steps_per_epoch,
+                                 validation_data=dev_gen,
+                                 validation_steps=validation_steps,
+                                 callbacks=callbacks, epochs=nepochs)
         return self
 
     def train_head_model(self, sents, heads, dev_sents, dev_heads, tags=None, dev_tags=None,
@@ -327,20 +390,34 @@ class StrangeSyntacticParser:
                                      callbacks=callbacks, epochs=nepochs)
         return self
 
-    def predict(self, data):
-        data = pad_data(data)
-        head_probs, chl_pred_heads = self.predict_heads(data)
-        deps = self.predict_deps(data, chl_pred_heads)
+    def predict(self, sents, tags=None):
+        sents = pad_data(sents)
+        if self.use_char_model:
+            sent_data = self._transform_data(sents, to_train=False)
+        else:
+            sent_data = sents
+        if tags is not None:
+            tag_data = self._transform_tags(tags, to_train=False)
+        else:
+            tag_data = None
+        head_probs, chl_pred_heads = self.predict_heads(sents, sent_data, tag_data)
+        deps = self.predict_deps(sents, sent_data, chl_pred_heads, tag_data)
         return chl_pred_heads, deps
 
-    def predict_heads(self, data):
-        probs, heads = [None] * len(data), [None] * len(data)
-        test_gen = DataGenerator(data, embedder=self.embedder,
-                                 yield_targets=False, yield_indexes=True, nepochs=1)
+    def predict_heads(self, sents, sent_data, tags=None):
+        probs, heads = [None] * len(sents), [None] * len(sents)
+        data = [sents, sent_data, tags]
+        additional_data = [data[i] for i in self.active_input_indexes[1:]]
+        test_gen = DataGenerator(data[self.first_input_index], additional_data=additional_data,
+                                 embedder=self.embedder, yield_targets=False, yield_indexes=True,
+                                 shuffle=False, nepochs=1)
         for batch_index, (batch, indexes) in enumerate(test_gen):
-            batch_probs = self.head_model.predict(batch)
+            if self.use_joint_model:
+                batch_probs = self.head_model(batch + [0])[0]
+            else:
+                batch_probs = self.head_model.predict(batch)
             for i, index in enumerate(indexes):
-                L = len(data[index])
+                L = len(sents[index])
                 curr_probs = batch_probs[i][:L - 1, :L - 1]
                 curr_probs /= np.sum(curr_probs, axis=-1)
                 probs[index] = curr_probs
@@ -348,19 +425,25 @@ class StrangeSyntacticParser:
         chl_pred_heads = [chu_liu_edmonds(elem.astype("float64"))[0][1:] for elem in probs]
         return probs, chl_pred_heads
 
-    def predict_deps(self, data, heads):
+    def predict_deps(self, sents, sent_data, heads, tags=None):
         dep_indexes, head_indexes = make_indexes_for_syntax(heads)
-        generator_params = {"embedder": self.embedder,
-                            "additional_padding": [DataGenerator.POSITION_AS_PADDING] * 2}
-        test_gen = DataGenerator(data, additional_data=[dep_indexes, head_indexes],
-                                 yield_indexes=True, yield_targets=False, shuffle=False,
-                                 nepochs=1, **generator_params)
-        answer = [None] * len(data)
+        data = [sents, sent_data, tags]
+        additional_data = [data[i] for i in self.active_input_indexes[1:]] + [dep_indexes, head_indexes]
+        additional_padding = [0] * (len(additional_data)-2) + [DataGenerator.POSITION_AS_PADDING] * 2
+        generator_params = {"embedder": self.embedder, "additional_data": additional_data,
+                            "additional_padding": additional_padding}
+        test_gen = DataGenerator(data[self.first_input_index],
+                                 yield_indexes=True, yield_targets=False,
+                                 shuffle=False, nepochs=1, **generator_params)
+        answer = [None] * len(sents)
         for batch, indexes in test_gen:
-            batch_probs = self.dep_model.predict(batch)
+            if self.use_joint_model:
+                batch_probs = self.dep_model(batch + [0])[0]
+            else:
+                batch_probs = self.dep_model.predict(batch)
             batch_labels = np.argmax(batch_probs, axis=-1)
             for i, index in enumerate(indexes):
-                L = len(data[index])
+                L = len(sents[index])
                 curr_labels = batch_labels[i][1:L - 1]
                 answer[index] = [self.dep_vocab.symbols_[elem] for elem in curr_labels]
         return answer
