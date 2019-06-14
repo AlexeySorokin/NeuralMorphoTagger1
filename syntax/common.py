@@ -1,4 +1,4 @@
-# from common.common import BEGIN, END, PAD
+from common.common import BEGIN, END, PAD
 
 from deeppavlov import build_model, configs
 from deeppavlov.core.common.params import from_params
@@ -28,14 +28,21 @@ def pad_data(words, heads=None, deps=None):
     return tuple(answer) if len(answer) > 1 else answer[0]
 
 
-def make_indexes_for_syntax(heads, deps=None, dep_vocab=None):
+def make_indexes_for_syntax(heads, deps=None, dep_vocab=None, to_pad=True):
     dep_indexes, head_indexes, dep_codes = [], [], []
     for head_sent in heads:
         L = len(head_sent)
-        dep_indexes.append(list(range(L+2)))
-        head_indexes.append([0] + head_sent + [L+1])
+        if to_pad:
+            dep_indexes.append(list(range(L+2)))
+            head_indexes.append([0] + head_sent + [L+1])
+        else:
+            dep_indexes.append(list(range(L)))
+            head_indexes.append(head_sent)
     if deps is not None:
         for dep_sent in deps:
-            dep_codes.append([BEGIN] + [dep_vocab.toidx(x) for x in dep_sent] + [END])
+            curr_dep_codes = [dep_vocab.toidx(x) for x in dep_sent]
+            if to_pad:
+                curr_dep_codes = [BEGIN] + curr_dep_codes + [END]
+            dep_codes.append(curr_dep_codes)
         return dep_indexes, head_indexes, dep_codes
     return dep_indexes, head_indexes

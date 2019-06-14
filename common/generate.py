@@ -258,9 +258,9 @@ class DataGenerator:
         if isinstance(self.pad_additional_data, bool):
             self.pad_additional_data = [self.pad_additional_data] * len(self.additional_data)
         if self.additional_padding is None:
-            self.additional_padding = [None] * len(self.additional_data)
+            self.additional_padding = [0] * len(self.additional_data)
         if self.additional_target_paddings is None:
-            self.additional_target_paddings = [None] * len(self.additional_targets)
+            self.additional_target_paddings = [0] * len(self.additional_targets)
         self.indexes = []
         ordered_indexes = np.argsort([len(x) for x in self.data])
         for i in range(0, len(ordered_indexes), self.batch_size):

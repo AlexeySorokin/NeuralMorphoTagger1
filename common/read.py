@@ -11,7 +11,8 @@ POS_MAPPING = {".": "<SENT>", "?": "<QUESTION>", "!":"<EXCLAM>",
 REVERSE_POS_MAPPING = list(POS_MAPPING.values())
 
 
-def process_word(word, to_lower=False, append_case=None):
+def process_word(word, to_lower=False, append_case=None, special_tokens=None):
+    special_tokens = special_tokens or []
     if all(x.isupper() for x in word) and len(word) > 1:
         uppercase = "<ALL_UPPER>"
     elif word[0].isupper():
@@ -24,6 +25,8 @@ def process_word(word, to_lower=False, append_case=None):
         answer = ["<DIGIT>"]
     elif word.startswith("http://") or word.startswith("www."):
         answer = ["<HTTP>"]
+    elif word in special_tokens:
+        answer = [word]
     else:
         answer = list(word)
     if to_lower and uppercase is not None:

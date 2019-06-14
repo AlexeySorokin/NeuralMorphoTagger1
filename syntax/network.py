@@ -12,11 +12,12 @@ from keras import Model
 from keras.engine.topology import InputSpec
 from keras.callbacks import EarlyStopping
 
-from common.read import read_syntax_infile
-from common.vocabulary import Vocabulary, vocabulary_from_json
+from common.read import read_syntax_infile, process_word, make_UD_pos_and_tag
+from common.vocabulary import Vocabulary, FeatureVocabulary, vocabulary_from_json
 from common.generate import DataGenerator
+from common.common import BEGIN, END, PAD
 from common.common import gather_indexes
-from common.cells import BiaffineAttention
+from common.cells import BiaffineAttention, build_word_cnn
 from syntax.common import pad_data, load_elmo, make_indexes_for_syntax
 from dependency_decoding import chu_liu_edmonds
 
@@ -57,7 +58,7 @@ def load_syntactic_parser(infile):
     info = {key: config.get(key) for key in ["head_model_params", "dep_model_params",
                                              "head_train_params", "dep_train_params"]}
     embedder = load_elmo()
-    parser = SyntacticParser(embedder=embedder, **info)
+    parser = StrangeSyntacticParser(embedder=embedder, **info)
     parser.dep_vocab = vocabulary_from_json(config["dep_vocab"])
     parser.head_model = parser.build_head_network(**parser.head_model_params)
     parser.dep_model = parser.build_dep_network(**parser.dep_model_params)
@@ -68,45 +69,92 @@ def load_syntactic_parser(infile):
     return parser
 
 
-class SyntacticParser:
+class StrangeSyntacticParser:
 
-    def __init__(self, embedder, head_model_params=None, dep_model_params=None,
-                 head_train_params=None, dep_train_params=None):
+    MAX_WORD_LENGTH = 30
+
+    def __init__(self, embedder=None, use_tags=False,
+                 use_char_model=False, max_word_length=MAX_WORD_LENGTH,
+                 head_model_params=None, dep_model_params=None,
+                 head_train_params=None, dep_train_params=None,
+                 char_layer_params=None):
         self.embedder = embedder
+        self.use_tags = use_tags
+        self.use_char_model = use_char_model
+        self.max_word_length = max_word_length
         self.head_model_params = head_model_params or dict()
         self.dep_model_params = dep_model_params or dict()
         self.head_train_params = head_train_params or dict()
         self.dep_train_params = dep_train_params or dict()
+        self.char_layer_params = char_layer_params or dict()
+        self.head_model_params["char_layer_params"] = self.char_layer_params
+        self.dep_model_params["char_layer_params"] = self.char_layer_params
 
-    def build_head_network(self, use_lstm=True, lstm_size=128, state_size=384, activation="relu"):
-        word_inputs = kl.Input(shape=(None, self.embedder.dim), dtype="float32")
-        if use_lstm:
-            projected_inputs = kl.Bidirectional(kl.LSTM(units=lstm_size, return_sequences=True))(word_inputs)
+    def _initialize_position_embeddings(self):
+        new_weight = np.eye(128, dtype="float") / np.sqrt(128)
+        new_weight = np.concatenate([new_weight, [[0] * 128]], axis=0)
+        layer: kl.Layer = self.head_model.get_layer(name="pos_embeddings")
+        layer.set_weights([new_weight])
+        return
+
+    def build_head_network(self, use_lstm=True, lstm_size=128, state_size=384,
+                           activation="relu", char_layer_params=None,
+                           tag_embeddings_size=64):
+        if self.embedder is not None:
+            word_inputs = kl.Input(shape=(None, self.embedder.dim), dtype="float32")
+            word_embeddings = word_inputs
         else:
-            projected_inputs = kl.Dense(256, activation="tanh")(word_inputs)
-        position_embeddings = PositionEmbedding(max_length=128, dim=128)(projected_inputs)
+            word_inputs = kl.Input(shape=(None, self.max_word_length + 2), dtype="float32")
+            char_layer_params = char_layer_params or dict()
+            word_embeddings = build_word_cnn(word_inputs, from_one_hot=False,
+                                             symbols_number=self.symbol_vocabulary.symbols_number_,
+                                             char_embeddings_size=32, **char_layer_params)
+        inputs = [word_inputs]
+        if self.use_tags:
+            tag_inputs = kl.Input(shape=(None, self.tag_vocabulary.symbol_vector_size_), dtype="float32")
+            tag_embeddings = kl.Dense(tag_embeddings_size, activation="relu")(tag_inputs)
+            inputs.append(tag_inputs)
+            word_embeddings = kl.Concatenate()([word_embeddings, tag_embeddings])
+        if use_lstm:
+            projected_inputs = kl.Bidirectional(kl.LSTM(units=lstm_size, return_sequences=True))(word_embeddings)
+        else:
+            projected_inputs = kl.Dense(256, activation="tanh")(word_embeddings)
+        position_embeddings = PositionEmbedding(max_length=128, dim=128, name="pos_embeddings")(projected_inputs)
         embeddings = kl.Concatenate()([projected_inputs, position_embeddings])
         head_states = kl.Dense(state_size, activation=activation)(embeddings)
         dep_states = kl.Dense(state_size, activation=activation)(embeddings)
         attention = BiaffineAttention(state_size)([head_states, dep_states])
         attention_probs = kl.Softmax()(attention)
-        model = Model(word_inputs, attention_probs)
+        model = Model(inputs, attention_probs)
         model.compile(optimizer=kopt.Adam(clipnorm=5.0), loss="categorical_crossentropy", metrics=["accuracy"])
         print(model.summary())
         return model
 
-    def build_dep_network(self, lstm_units=128, state_units=256, dense_units=None):
+    def build_dep_network(self, lstm_units=128, state_units=256, dense_units=None,
+                          tag_embeddings_size=64, char_layer_params=None):
         dense_units = dense_units or []
-        word_inputs = kl.Input(shape=(None, self.embedder.dim), dtype="float32")
+        char_layer_params = char_layer_params or dict()
+        if self.embedder is not None:
+            word_inputs = kl.Input(shape=(None, self.embedder.dim), dtype="float32")
+            word_embeddings = word_inputs
+        else:
+            word_inputs = kl.Input(shape=(None, self.max_word_length + 2), dtype="float32")
+            char_layer_params = char_layer_params or dict()
+            word_embeddings = build_word_cnn(word_inputs, from_one_hot=False,
+                                             symbols_number=self.symbol_vocabulary.symbols_number_,
+                                             char_embeddings_size=32, **char_layer_params)
         dep_inputs = kl.Input(shape=(None,), dtype="int32")
         head_inputs = kl.Input(shape=(None,), dtype="int32")
         inputs = [word_inputs, dep_inputs, head_inputs]
+        if self.use_tags:
+            tag_inputs = kl.Input(shape=(None, self.tag_vocabulary.symbol_vector_size_), dtype="float32")
+            tag_embeddings = kl.Dense(tag_embeddings_size, activation="relu")(tag_inputs)
+            inputs.append(tag_inputs)
+            word_embeddings = kl.Concatenate()([word_embeddings, tag_embeddings])
         if lstm_units > 0:
-            word_inputs = kl.Bidirectional(kl.LSTM(lstm_units, return_sequences=True))(word_inputs)
-        # dep_inputs = kl.Lambda(kb.expand_dims, output_shape=(lambda x: x + (1,)))(dep_inputs)
-        # head_inputs = kl.Lambda(kb.expand_dims, output_shape=(lambda x: x + (1,)))(head_inputs)
-        dep_embeddings = kl.Lambda(gather_indexes, arguments={"B": dep_inputs})(word_inputs)
-        head_embeddings = kl.Lambda(gather_indexes, arguments={"B": head_inputs})(word_inputs)
+            word_embeddings = kl.Bidirectional(kl.LSTM(lstm_units, return_sequences=True))(word_embeddings)
+        dep_embeddings = kl.Lambda(gather_indexes, arguments={"B": dep_inputs})(word_embeddings)
+        head_embeddings = kl.Lambda(gather_indexes, arguments={"B": head_inputs})(word_embeddings)
         dep_states = kl.Dense(state_units, activation=None)(dep_embeddings)
         dep_states = kl.ReLU()(kl.BatchNormalization()(dep_states))
         head_states = kl.Dense(state_units, activation=None)(head_embeddings)
@@ -120,22 +168,103 @@ class SyntacticParser:
         print(model.summary())
         return model
 
-    def train(self, sents, heads, deps, dev_sents=None, dev_heads=None, dev_deps=None):
+
+    def build_Dozat_network(self, state_units=256, dropout=0.2,
+                            lstm_layers=1, lstm_size=128, lstm_dropout=0.2,
+                            char_layer_params=None, tag_embeddings_size=64):
+        inputs, embeddings = [], []
+        if self.embedder is not None:
+            word_inputs = kl.Input(shape=(None, self.embedder.dim), dtype="float32")
+            inputs.append(word_inputs)
+            embeddings.append(word_inputs)
+        if self.use_char_model:
+            char_inputs = kl.Input(shape=(None, self.max_word_length + 2), dtype="float32")
+            char_layer_params = char_layer_params or dict()
+            word_embeddings = build_word_cnn(char_inputs, from_one_hot=False,
+                                             symbols_number=self.symbol_vocabulary.symbols_number_,
+                                             char_embeddings_size=32, **char_layer_params)
+            embeddings.append(word_embeddings)
+        if self.use_tags:
+            tag_inputs = kl.Input(shape=(None, self.tag_vocabulary.symbol_vector_size_), dtype="float32")
+            tag_embeddings = kl.Dense(tag_embeddings_size, activation="relu")(tag_inputs)
+            inputs.append(tag_inputs)
+            embeddings.append(tag_embeddings)
+        embeddings = kl.Concatenate()(embeddings) if len(embeddings) > 1 else embeddings[0]
+        lstm_input = embeddings
+        for i in range(lstm_layers-1):
+            lstm_layer = kl.Bidirectional(kl.LSTM(lstm_size, dropout=lstm_dropout, return_sequences=True))
+            lstm_input = lstm_layer(lstm_input)
+        lstm_layer = kl.Bidirectional(kl.LSTM(lstm_size, dropout=lstm_dropout, return_sequences=True))
+        lstm_output = lstm_layer(embeddings)
+        head_encodings = kl.Dense(state_units, activation="relu")(lstm_output)
+        dep_encodings = kl.Dense(state_units, activation="relu")(lstm_output)
+        head_similarities = BiaffineAttention(state_units)([head_encodings, dep_encodings])
+
+
+
+    def _recode(self, sent):
+        if isinstance(sent[0], str):
+            sent, from_word = [sent], True
+        else:
+            from_word = False
+        answer = np.full(shape=(len(sent), self.max_word_length+2), fill_value=PAD, dtype="int32")
+        for i, word in enumerate(sent):
+            word = word[-self.max_word_length:]
+            answer[i, 0], answer[i, len(word) + 1] = BEGIN, END
+            answer[i, 1:len(word) + 1] = self.symbol_vocabulary.toidx(word)
+        return answer[0] if from_word else answer
+
+    def _transform_data(self, sents, to_train=False):
+        sents = [[process_word(word, to_lower=True, append_case="first",
+                               special_tokens=["<s>", "</s>"]) for word in sent] for sent in sents]
+        if to_train:
+            self.symbol_vocabulary = Vocabulary(character=True, min_count=3).train(sents)
+        sents = [self._recode(sent) for sent in sents]
+        return sents
+
+    def _transform_tags(self, sents, to_train=False):
+        sents = [['BEGIN'] + sent + ['END'] for sent in sents]
+        if to_train:
+            self.tag_vocabulary = FeatureVocabulary(min_count=3).train(sents)
+        answer = [[self.tag_vocabulary.to_vector(x, return_vector=True) for x in sent] for sent in sents]
+        return answer
+
+    def train(self, sents, heads, deps, dev_sents=None, dev_heads=None, dev_deps=None,
+              tags=None, dev_tags=None):
         sents, heads, deps = pad_data(sents, heads, deps)
+        if self.use_char_model:
+            sent_data = self._transform_data(sents, to_train=True)
+        else:
+            sent_data = sents
+        if tags is not None:
+            tag_data = self._transform_tags(tags, to_train=True)
+        else:
+            tag_data = None
         if dev_sents is not None:
             dev_sents, dev_heads, dev_deps = pad_data(dev_sents, dev_heads, dev_deps)
-        self.train_head_model(sents, heads, dev_sents, dev_heads, **self.head_train_params)
+            dev_sent_data = self._transform_data(dev_sents) if self.use_char_model else dev_sents
+            dev_tag_data = self._transform_tags(dev_tags) if self.use_tags else None
+        else:
+            dev_sent_data, dev_heads, dev_deps, dev_tag_data = None, None, None, None
         self.dep_vocab = Vocabulary(min_count=3).train(deps)
-        self.train_dep_model(sents, heads, deps, dev_sents, dev_heads, dev_deps, **self.dep_train_params)
+        self.train_head_model(sent_data, heads, dev_sent_data, dev_heads,
+                              tags=tag_data, dev_tags=dev_tag_data, **self.head_train_params)
+        self.train_dep_model(sent_data, heads, deps, dev_sent_data, dev_heads, dev_deps,
+                             tags=tag_data, dev_tags=dev_tag_data, **self.dep_train_params)
         return self
 
-    def train_head_model(self, sents, heads, dev_sents, dev_heads,
+    def train_head_model(self, sents, heads, dev_sents, dev_heads, tags=None, dev_tags=None,
                          nepochs=5, batch_size=16, patience=1):
         self.head_model = self.build_head_network(**self.head_model_params)
-        head_gen_params = {"embedder": self.embedder, "classes_number": DataGenerator.POSITIONS_AS_CLASSES}
-        train_gen = DataGenerator(sents, heads, **head_gen_params)
+        # self._initialize_position_embeddings()
+        head_gen_params = {"embedder": self.embedder, "batch_size": batch_size,
+                           "classes_number": DataGenerator.POSITIONS_AS_CLASSES}
+        additional_data = [tags] if self.use_tags else None
+        train_gen = DataGenerator(sents, heads, additional_data=additional_data, **head_gen_params)
         if dev_sents is not None:
-            dev_gen = DataGenerator(dev_sents, dev_heads, shuffle=False, **head_gen_params)
+            additional_data = [dev_tags] if self.use_tags else None
+            dev_gen = DataGenerator(dev_sents, dev_heads, additional_data=additional_data,
+                                    shuffle=False, **head_gen_params)
             validation_steps = dev_gen.steps_per_epoch
         else:
             dev_gen, validation_steps = None, None
@@ -144,12 +273,42 @@ class SyntacticParser:
             callbacks.append(EarlyStopping(monitor="val_acc", restore_best_weights=True, patience=patience))
         self.head_model.fit_generator(train_gen, train_gen.steps_per_epoch,
                                       validation_data=dev_gen, validation_steps=validation_steps,
-                                      callbacks=callbacks, epochs=nepochs, batch_size=batch_size)
+                                      callbacks=callbacks, epochs=nepochs)
         return self
 
     def train_dep_model(self, sents, heads, deps, dev_sents, dev_heads, dev_deps,
-                        nepochs=2, batch_size=16, patience=1):
-        raise NotImplementedError("")
+                        tags=None, dev_tags=None, nepochs=2, batch_size=16, patience=1):
+        self.dep_model = self.build_dep_network(**self.dep_model_params)
+        dep_indexes, head_indexes, dep_codes =\
+            make_indexes_for_syntax(heads, deps, dep_vocab=self.dep_vocab, to_pad=False)
+        dep_gen_params = {"embedder": self.embedder, "classes_number": self.dep_vocab.symbols_number_,
+                          "batch_size": batch_size, "target_padding": PAD,
+                          "additional_padding": [DataGenerator.POSITION_AS_PADDING] * 2}
+        additional_data = [dep_indexes, head_indexes]
+        if self.use_tags:
+            additional_data.append(tags)
+            dep_gen_params["additional_padding"].append(0)
+        train_gen = DataGenerator(sents, targets=dep_codes, additional_data=additional_data, **dep_gen_params)
+        if dev_sents is not None:
+            dev_dep_indexes, dev_head_indexes, dev_dep_codes = \
+                make_indexes_for_syntax(dev_heads, dev_deps, dep_vocab=self.dep_vocab, to_pad=False)
+            additional_data = [dev_dep_indexes, dev_head_indexes]
+            if self.use_tags:
+                additional_data.append(dev_tags)
+            dev_gen = DataGenerator(data=dev_sents, targets=dev_dep_codes,
+                                    additional_data=additional_data,
+                                    shuffle=False, **dep_gen_params)
+            validation_steps = dev_gen.steps_per_epoch
+        else:
+            dev_gen, validation_steps = None, None
+        callbacks = []
+        if patience >= 0:
+            callbacks.append(EarlyStopping(monitor="val_acc", restore_best_weights=True, patience=patience))
+        self.dep_model.fit_generator(train_gen, train_gen.steps_per_epoch,
+                                     validation_data=dev_gen,
+                                     validation_steps=validation_steps,
+                                     callbacks=callbacks, epochs=nepochs)
+        return self
 
     def predict(self, data):
         data = pad_data(data)
@@ -188,8 +347,6 @@ class SyntacticParser:
                 curr_labels = batch_labels[i][1:L - 1]
                 answer[index] = [self.dep_vocab.symbols_[elem] for elem in curr_labels]
         return answer
-
-
 
 
 def evaluate_heads(corr_heads, pred_heads):

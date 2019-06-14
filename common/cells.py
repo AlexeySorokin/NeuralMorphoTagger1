@@ -44,16 +44,24 @@ class Highway(kl.Layer):
         return input_shape
 
 
-def build_word_cnn(inputs, char_embeddings_size=16, char_window_size=5,
-                   char_filters=None, char_filter_multiple=25,
+def build_word_cnn(inputs, symbols_number=None, char_embeddings_size=16,
+                   char_window_size=5, char_filters=None, char_filter_multiple=25,
                    char_conv_layers=1, highway_layers=1,
-                   dropout=0.0, intermediate_dropout=0.0, highway_dropout=0.0):
+                   dropout=0.0, intermediate_dropout=0.0,
+                   highway_dropout=0.0, from_one_hot=True):
     # inputs = kl.Lambda(kb.one_hot, arguments={"num_classes": self.symbols_number_},
     #                    output_shape=lambda x: tuple(x) + (self.symbols_number_,))(inputs)
-    inputs = kl.Lambda(kb.cast, arguments={"dtype": "float32"})(inputs)
-    char_embeddings = kl.Dense(char_embeddings_size, use_bias=False)(inputs)
+    if from_one_hot:
+        inputs = kl.Lambda(kb.cast, arguments={"dtype": "float32"})(inputs)
+        char_embeddings = kl.Dense(char_embeddings_size, use_bias=False)(inputs)
+    else:
+        char_embeddings = kl.Embedding(symbols_number, char_embeddings_size)(inputs)
     conv_outputs = []
     char_output_dim_ = 0
+    if isinstance(char_window_size, int):
+        char_window_size = [char_window_size]
+    if char_filters is None or isinstance(char_filters, int):
+        char_filters = [char_filters] * len(char_window_size)
     for window_size, filters_number in zip(char_window_size, char_filters):
         curr_output = char_embeddings
         curr_filters_number = (min(char_filter_multiple * window_size, 200)
@@ -89,14 +97,16 @@ def build_word_cnn(inputs, char_embeddings_size=16, char_window_size=5,
 
 class BiaffineAttention(kl.Layer):
 
-    def __init__(self, input_dim, **kwargs):
+    def __init__(self, input_dim, use_first_bias=False, use_second_bias=False, **kwargs):
         if 'input_shape' not in kwargs:
             kwargs['input_shape'] = (input_dim,)
         super(BiaffineAttention, self).__init__(**kwargs)
         self.input_dim = input_dim
+        self.use_first_bias = use_first_bias
+        self.use_second_bias = use_second_bias
         self.kernel_initializer = kint.Identity(gain=1.0 / np.sqrt(input_dim))
-        self.input_spec = [InputSpec(min_ndim=2, axes={-1: self.input_dim}),
-                           InputSpec(min_ndim=2, axes={-1: self.input_dim})]
+        self.input_spec = [InputSpec(ndim=3, axes={-1: self.input_dim}),
+                           InputSpec(ndim=3, axes={-1: self.input_dim})]
 
     def build(self, input_shape):
         assert len(input_shape) == 2
@@ -105,11 +115,26 @@ class BiaffineAttention(kl.Layer):
         self.kernel = self.add_weight(shape=(self.input_dim, self.input_dim),
                                       initializer=self.kernel_initializer,
                                       name='kernel')
+        if self.use_first_bias:
+            self.first_bias = self.add_weight(
+                shape=(self.input_dim, 1), initializer="glorot_uniform", name="first_bias")
+        if self.use_second_bias:
+            self.second_bias = self.add_weight(
+                shape=(self.input_dim, 1), initializer="glorot_uniform", name="second_bias")
         self.built = True
 
     def call(self, inputs, **kwargs):
-        first = kb.dot(inputs[0], self.kernel) # sum_i a_ij x_ri
-        answer = kb.batch_dot(first, inputs[1], axes=[2, 2])
+        # inputs[0].shape = inputs[1].shape = (B, L, D)
+        first = kb.dot(inputs[0], self.kernel)  # first_rie = sum_d x_{rid} a_{de}
+        answer = kb.batch_dot(first, inputs[1], axes=[2, 2])  # answer_{rij} = sum_e first_{rie} y_{rje}
+        # answer_{.ij} = sum_{d,e} x_{.id} a_{de} y_{.je}; ANSWER. = X A Y^T
+        if self.use_first_bias:
+            first_bias_term = kb.dot(inputs[0], self.first_bias)
+            answer += first_bias_term
+        if self.use_second_bias:
+            # second_bias_term.shape = (B, 1, L)
+            second_bias_term = kb.permute_dimensions(kb.dot(inputs[1], self.second_bias), [0, 2, 1])
+            answer += second_bias_term
         return answer
 
     def compute_output_shape(self, input_shape):

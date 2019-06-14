@@ -45,7 +45,7 @@ class Vocabulary:
             for x in curr_symbols:
                 symbols[x] += 1
         symbols = [x for x, count in symbols.items() if count >= self.min_count]
-        self.symbols_ = AUXILIARY + sorted(symbols)
+        self.symbols_ = AUXILIARY + sorted(x for x in symbols if x not in AUXILIARY)
         self.symbol_codes_ = {x: i for i, x in enumerate(self.symbols_)}
         return self
 
@@ -54,7 +54,7 @@ class Vocabulary:
         return self.symbol_codes_.get(remove_token_field(x), UNKNOWN)
 
     def toidx(self, tag):
-        if isinstance(tag, list):
+        if isinstance(tag, (list, tuple)):
             return [self._toidx(x) for x in tag]
         return self._toidx(tag)
 
