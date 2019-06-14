@@ -1,9 +1,9 @@
 import ujson as json
 import numpy as np
+import inspect
 
 import tensorflow as tf
 import keras.backend.tensorflow_backend as kbt
-
 import keras.backend as kb
 import keras.layers as kl
 import keras.optimizers as kopt
@@ -96,6 +96,23 @@ class StrangeSyntacticParser:
         if self.embedder is None and not self.use_char_model and not self.use_tags:
             raise ValueError("")
 
+    def to_json(self, outfile, model_file, head_model_file=None, dep_model_file=None):
+        info = dict()
+        # model_file = os.path.abspath(model_file)
+        for (attr, val) in inspect.getmembers(self):
+            if not (attr.startswith("__") or inspect.ismethod(val) or
+                    isinstance(getattr(StrangeSyntacticParser, attr, None), property) or
+                    isinstance(val, np.ndarray) or
+                    isinstance(val, Vocabulary) or attr.isupper() or
+                    attr.endswith("model_")):
+                info[attr] = val
+            elif isinstance(val, Vocabulary):
+                info[attr] = val.jsonize()
+            elif isinstance(val, np.ndarray):
+                val = val.tolist()
+                info[attr] = val
+        return
+
     @property
     def first_input_index(self):
         return 0 if self.embedder is not None else 1 if self.use_char_model else 2
@@ -109,7 +126,7 @@ class StrangeSyntacticParser:
     def _initialize_position_embeddings(self):
         new_weight = np.eye(128, dtype="float") / np.sqrt(128)
         new_weight = np.concatenate([new_weight, [[0] * 128]], axis=0)
-        layer: kl.Layer = self.head_model.get_layer(name="pos_embeddings")
+        layer: kl.Layer = self.head_model_.get_layer(name="pos_embeddings")
         layer.set_weights([new_weight])
         return
 
@@ -296,7 +313,7 @@ class StrangeSyntacticParser:
                           dev_sent_data, dev_sents, dev_heads, dev_deps,
                           tags=None, dev_tags=None,
                           nepochs=3, batch_size=16, patience=1):
-        self.model, self.head_model, self.dep_model = self.build_Dozat_network(**self.model_params)
+        self.model_, self.head_model_, self.dep_model_ = self.build_Dozat_network(**self.model_params)
         gen_params = {"embedder": self.embedder, "batch_size": batch_size,
                       "classes_number": DataGenerator.POSITIONS_AS_CLASSES,
                       "additional_classes_number": [self.dep_vocab.symbols_number_],
@@ -327,15 +344,15 @@ class StrangeSyntacticParser:
         callbacks = []
         if patience >= 0:
             callbacks.append(EarlyStopping(monitor="val_heads_acc", restore_best_weights=True, patience=patience))
-        self.model.fit_generator(train_gen, train_gen.steps_per_epoch,
-                                 validation_data=dev_gen,
-                                 validation_steps=validation_steps,
-                                 callbacks=callbacks, epochs=nepochs)
+        self.model_.fit_generator(train_gen, train_gen.steps_per_epoch,
+                                  validation_data=dev_gen,
+                                  validation_steps=validation_steps,
+                                  callbacks=callbacks, epochs=nepochs)
         return self
 
     def train_head_model(self, sents, heads, dev_sents, dev_heads, tags=None, dev_tags=None,
                          nepochs=5, batch_size=16, patience=1):
-        self.head_model = self.build_head_network(**self.head_model_params)
+        self.head_model_ = self.build_head_network(**self.head_model_params)
         # self._initialize_position_embeddings()
         head_gen_params = {"embedder": self.embedder, "batch_size": batch_size,
                            "classes_number": DataGenerator.POSITIONS_AS_CLASSES}
@@ -351,14 +368,14 @@ class StrangeSyntacticParser:
         callbacks = []
         if patience >= 0:
             callbacks.append(EarlyStopping(monitor="val_acc", restore_best_weights=True, patience=patience))
-        self.head_model.fit_generator(train_gen, train_gen.steps_per_epoch,
-                                      validation_data=dev_gen, validation_steps=validation_steps,
-                                      callbacks=callbacks, epochs=nepochs)
+        self.head_model_.fit_generator(train_gen, train_gen.steps_per_epoch,
+                                       validation_data=dev_gen, validation_steps=validation_steps,
+                                       callbacks=callbacks, epochs=nepochs)
         return self
 
     def train_dep_model(self, sents, heads, deps, dev_sents, dev_heads, dev_deps,
                         tags=None, dev_tags=None, nepochs=2, batch_size=16, patience=1):
-        self.dep_model = self.build_dep_network(**self.dep_model_params)
+        self.dep_model_ = self.build_dep_network(**self.dep_model_params)
         dep_indexes, head_indexes, dep_codes =\
             make_indexes_for_syntax(heads, deps, dep_vocab=self.dep_vocab, to_pad=False)
         dep_gen_params = {"embedder": self.embedder, "classes_number": self.dep_vocab.symbols_number_,
@@ -384,10 +401,10 @@ class StrangeSyntacticParser:
         callbacks = []
         if patience >= 0:
             callbacks.append(EarlyStopping(monitor="val_acc", restore_best_weights=True, patience=patience))
-        self.dep_model.fit_generator(train_gen, train_gen.steps_per_epoch,
-                                     validation_data=dev_gen,
-                                     validation_steps=validation_steps,
-                                     callbacks=callbacks, epochs=nepochs)
+        self.dep_model_.fit_generator(train_gen, train_gen.steps_per_epoch,
+                                      validation_data=dev_gen,
+                                      validation_steps=validation_steps,
+                                      callbacks=callbacks, epochs=nepochs)
         return self
 
     def predict(self, sents, tags=None):
@@ -413,9 +430,9 @@ class StrangeSyntacticParser:
                                  shuffle=False, nepochs=1)
         for batch_index, (batch, indexes) in enumerate(test_gen):
             if self.use_joint_model:
-                batch_probs = self.head_model(batch + [0])[0]
+                batch_probs = self.head_model_(batch + [0])[0]
             else:
-                batch_probs = self.head_model.predict(batch)
+                batch_probs = self.head_model_.predict(batch)
             for i, index in enumerate(indexes):
                 L = len(sents[index])
                 curr_probs = batch_probs[i][:L - 1, :L - 1]
@@ -438,9 +455,9 @@ class StrangeSyntacticParser:
         answer = [None] * len(sents)
         for batch, indexes in test_gen:
             if self.use_joint_model:
-                batch_probs = self.dep_model(batch + [0])[0]
+                batch_probs = self.dep_model_(batch + [0])[0]
             else:
-                batch_probs = self.dep_model.predict(batch)
+                batch_probs = self.dep_model_.predict(batch)
             batch_labels = np.argmax(batch_probs, axis=-1)
             for i, index in enumerate(indexes):
                 L = len(sents[index])
