@@ -17,7 +17,7 @@ from common.vocabulary import Vocabulary, FeatureVocabulary, vocabulary_from_jso
 from common.generate import DataGenerator
 from common.common import BEGIN, END, PAD
 from common.common import gather_indexes
-from common.cells import BiaffineAttention, build_word_cnn
+from common.cells import BiaffineAttention, BiaffineLayer, build_word_cnn
 from syntax.common import pad_data, load_elmo, make_indexes_for_syntax
 from dependency_decoding import chu_liu_edmonds
 
@@ -196,11 +196,28 @@ class StrangeSyntacticParser:
             lstm_input = lstm_layer(lstm_input)
         lstm_layer = kl.Bidirectional(kl.LSTM(lstm_size, dropout=lstm_dropout, return_sequences=True))
         lstm_output = lstm_layer(embeddings)
-        head_encodings = kl.Dense(state_units, activation="relu")(lstm_output)
-        dep_encodings = kl.Dense(state_units, activation="relu")(lstm_output)
-        head_similarities = BiaffineAttention(state_units)([head_encodings, dep_encodings])
-
-
+        # selecting each word head
+        head_encodings = kl.Dropout(dropout)(kl.Dense(state_units, activation="relu")(lstm_output))
+        dep_encodings = kl.Dropout(dropout)(kl.Dense(state_units, activation="relu")(lstm_output))
+        head_similarities = BiaffineAttention(state_units, use_first_bias=True)([dep_encodings, head_encodings])
+        head_probs = kl.Softmax(naem="heads", axis=-1)(head_similarities)
+        # selecting each word dependency type (with gold heads)
+        dep_inputs = kl.Input(shape=(None,), dtype="int32")
+        head_inputs = kl.Input(shape=(None,), dtype="int32")
+        inputs.extend([dep_inputs, head_inputs])
+        dep_embeddings = kl.Lambda(gather_indexes, arguments={"B": dep_inputs})(lstm_output)
+        head_embeddings = kl.Lambda(gather_indexes, arguments={"B": head_inputs})(lstm_output)
+        dep_encodings = kl.Dropout(dropout)(kl.Dense(state_units, activation="relu")(dep_embeddings))
+        head_encodings = kl.Dropout(dropout)(kl.Dense(state_units, activation="relu")(head_embeddings))
+        dep_probs = BiaffineLayer(state_units, self.dep_vocab.symbols_number_,
+                                  name="deps", use_first_bias=True, use_second_bias=True,
+                                  use_label_bias=True, activation="softmax")([dep_embeddings, head_embeddings])
+        outputs = [head_probs, dep_probs]
+        model = Model(inputs, outputs)
+        model.compile(optimizer=kopt.Adam(clipnorm=5.0), loss=["categorical_crossentropy"] * 2,
+                      metrics=["accuracy", "accuracy"])
+        print(model.summary())
+        return model
 
     def _recode(self, sent):
         if isinstance(sent[0], str):

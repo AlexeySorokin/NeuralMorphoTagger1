@@ -5,7 +5,6 @@ from keras.engine import InputSpec
 import keras.initializers as kint
 
 
-
 class Highway(kl.Layer):
 
     def __init__(self, activation=None, bias_initializer=-1, **kwargs):
@@ -97,14 +96,18 @@ def build_word_cnn(inputs, symbols_number=None, char_embeddings_size=16,
 
 class BiaffineAttention(kl.Layer):
 
-    def __init__(self, input_dim, use_first_bias=False, use_second_bias=False, **kwargs):
+    def __init__(self, input_dim, use_first_bias=False, use_second_bias=False,
+                 initializer="identity", **kwargs):
         if 'input_shape' not in kwargs:
             kwargs['input_shape'] = (input_dim,)
         super(BiaffineAttention, self).__init__(**kwargs)
         self.input_dim = input_dim
         self.use_first_bias = use_first_bias
         self.use_second_bias = use_second_bias
-        self.kernel_initializer = kint.Identity(gain=1.0 / np.sqrt(input_dim))
+        if initializer == "identity":
+            self.kernel_initializer = kint.Identity(gain=1.0 / np.sqrt(input_dim))
+        else:
+            self.kernel_initializer = kint.glorot_uniform()
         self.input_spec = [InputSpec(ndim=3, axes={-1: self.input_dim}),
                            InputSpec(ndim=3, axes={-1: self.input_dim})]
 
@@ -112,15 +115,15 @@ class BiaffineAttention(kl.Layer):
         assert len(input_shape) == 2
         assert input_shape[0] == input_shape[1]
 
-        self.kernel = self.add_weight(shape=(self.input_dim, self.input_dim),
-                                      initializer=self.kernel_initializer,
-                                      name='kernel')
+        kernel_shape = (self.input_dim, self.input_dim)
+        self.kernel = self.add_weight(shape=kernel_shape, initializer=self.kernel_initializer, name='kernel')
+        bias_shape = (self.input_dim, 1)
         if self.use_first_bias:
             self.first_bias = self.add_weight(
-                shape=(self.input_dim, 1), initializer="glorot_uniform", name="first_bias")
+                shape=bias_shape, initializer="glorot_uniform", name="first_bias")
         if self.use_second_bias:
             self.second_bias = self.add_weight(
-                shape=(self.input_dim, 1), initializer="glorot_uniform", name="second_bias")
+                shape=bias_shape, initializer="glorot_uniform", name="second_bias")
         self.built = True
 
     def call(self, inputs, **kwargs):
@@ -133,10 +136,70 @@ class BiaffineAttention(kl.Layer):
             answer += first_bias_term
         if self.use_second_bias:
             # second_bias_term.shape = (B, 1, L)
-            second_bias_term = kb.permute_dimensions(kb.dot(inputs[1], self.second_bias), [0, 2, 1])
+            second_bias_term = kb.dot(inputs[1], self.second_bias)
+            second_bias_term = kb.permute_dimensions(second_bias_term, [0, 2, 1])
             answer += second_bias_term
         return answer
 
     def compute_output_shape(self, input_shape):
         input_shape = input_shape[0]
-        return tuple(input_shape[:-1]) + (input_shape[-2],)
+        answer = tuple(input_shape[:-1]) + (input_shape[-2],)
+        return answer
+
+
+class BiaffineLayer(kl.Layer):
+
+    def __init__(self, labels_number, input_dim,  use_first_bias=False,
+                 use_second_bias=False, use_label_bias=False, activation=None,
+                 **kwargs):
+        if 'input_shape' not in kwargs:
+            kwargs['input_shape'] = (input_dim,)
+        super(BiaffineLayer, self).__init__(**kwargs)
+        self.labels_number = labels_number
+        self.input_dim = input_dim
+        self.use_first_bias = use_first_bias
+        self.use_second_bias = use_second_bias
+        self.use_label_bias = use_label_bias
+        self.activation = kact.get(activation)
+        self.input_spec = [InputSpec(min_ndim=2, axes={-1: self.input_dim}),
+                           InputSpec(min_ndim=2, axes={-1: self.input_dim})]
+
+    def build(self, input_shape):
+        assert len(input_shape) == 2
+        assert input_shape[0] == input_shape[1]
+
+        kernel_shape = (self.input_dim, self.input_dim * self.labels_number)
+        self.kernel = self.add_weight(shape=kernel_shape, initializer="glorot_uniform", name='kernel')
+        if self.use_first_bias:
+            self.first_bias = self.add_weight(shape=(self.input_dim, self.labels_number),
+                                              initializer="glorot_uniform", name="first_bias")
+        if self.use_second_bias:
+            self.second_bias = self.add_weight(shape=(self.input_dim, self.labels_number),
+                                               initializer="glorot_uniform", name="second_bias")
+        if self.use_label_bias:
+            self.label_bias = self.add_weight(
+                shape=(self.labels_number,), initializer="glorot_uniform", name="second_bias")
+        self.built = True
+
+    def call(self, inputs, **kwargs):
+        input_shape = [kb.shape(inputs[0])[i] for i in range(kb.ndim(inputs[0]))]
+        first_input = kb.reshape(inputs[0], [-1, self.input_dim])
+        second_input = kb.reshape(inputs[1], [-1, self.input_dim])
+        first = kb.reshape(kb.dot(first_input, self.kernel),
+                           shape=[-1, self.input_dim, self.labels_number])
+        answer = kb.batch_dot(first, second_input, axes=[1, 1])
+        if self.use_first_bias:
+            answer += kb.dot(first_input, self.first_bias)
+        if self.use_second_bias:
+            answer += kb.dot(second_input, self.second_bias)
+        if self.use_label_bias:
+            answer = kb.bias_add(answer, self.label_bias)
+        if self.activation is not None:
+            answer = self.activation(answer)
+        answer = kb.reshape(answer, input_shape[:-1] + [self.labels_number])
+        return answer
+
+    def compute_output_shape(self, input_shape):
+        input_shape = input_shape[0]
+        answer = tuple(input_shape[:-1]) + (self.labels_number,)
+        return answer
