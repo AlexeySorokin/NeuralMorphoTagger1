@@ -1,3 +1,4 @@
+import os
 import ujson as json
 import numpy as np
 import inspect
@@ -59,13 +60,42 @@ def load_syntactic_parser(infile):
                                              "head_train_params", "dep_train_params"]}
     embedder = load_elmo()
     parser = StrangeSyntacticParser(embedder=embedder, **info)
-    parser.dep_vocab = vocabulary_from_json(config["dep_vocab"])
+    parser.dep_vocabulary_ = vocabulary_from_json(config["dep_vocab"])
     parser.head_model = parser.build_head_network(**parser.head_model_params)
     parser.dep_model = parser.build_dep_network(**parser.dep_model_params)
     if "head_model_save_file" in config:
         parser.head_model.load_weights(config["head_model_save_file"])
     if "dep_model_save_file" in config:
         parser.dep_model.load_weights(config["dep_model_save_file"])
+    return parser
+
+
+def load_parser(infile):
+    with open(infile, "r", encoding="utf8") as fin:
+        config = json.load(fin)
+    embedder = config.pop("embedder", None)
+    if embedder is not None:
+        embedder = load_elmo()
+    config["embedder"] = embedder
+    vocabulary_keys = [key for key in config if key.endswith("vocabulary_")]
+    vocab_config = {key: vocabulary_from_json(
+                        config.pop(key), use_features=(key=="tag_vocabulary_"))
+                    for key in vocabulary_keys}
+    model_config = {key: config.pop(key) for key in ["model_file", "head_model_file", "dep_model_file"]
+                    if key in config}
+    parser = StrangeSyntacticParser(**config)
+    for key, value in vocab_config.items():
+        setattr(parser, key, value)
+    if parser.use_joint_model:
+        parser.model_, parser.head_model_, parser.dep_model_ = parser.build_Dozat_network(**parser.model_params)
+    else:
+        parser.head_model_ = parser.build_head_network(**parser.head_model_params)
+        parser.dep_model_ = parser.build_dep_network(**parser.dep_model_params)
+    for key, weights_file in model_config.items():
+        model_key = key[:-4]
+        model = getattr(parser, model_key)
+        weights_file = os.path.join(os.path.dirname(infile), weights_file)
+        model.load_weights(weights_file)
     return parser
 
 
@@ -96,21 +126,33 @@ class StrangeSyntacticParser:
         if self.embedder is None and not self.use_char_model and not self.use_tags:
             raise ValueError("")
 
-    def to_json(self, outfile, model_file, head_model_file=None, dep_model_file=None):
+    def to_json(self, outfile, model_file=None, head_model_file=None, dep_model_file=None):
         info = dict()
-        # model_file = os.path.abspath(model_file)
+        outdir = os.path.dirname(outfile)
         for (attr, val) in inspect.getmembers(self):
+            print(attr)
             if not (attr.startswith("__") or inspect.ismethod(val) or
                     isinstance(getattr(StrangeSyntacticParser, attr, None), property) or
                     isinstance(val, np.ndarray) or
                     isinstance(val, Vocabulary) or attr.isupper() or
-                    attr.endswith("model_")):
+                    attr.endswith("model_") or attr == "embedder"):
                 info[attr] = val
             elif isinstance(val, Vocabulary):
                 info[attr] = val.jsonize()
             elif isinstance(val, np.ndarray):
                 val = val.tolist()
                 info[attr] = val
+            elif attr == "embedder":
+                if val is not None:
+                    info[attr] = "elmo"
+        for key in ["model_", "head_model_", "dep_model_"]:
+            keyfile = locals()[key + "file"]
+            if keyfile is not None:
+                info[key + "file"] = os.path.relpath(os.path.abspath(keyfile), outdir)
+                model = getattr(self, key)
+                model.save_weights(keyfile)
+        with open(outfile, "w", encoding="utf8") as fout:
+            json.dump(info, fout)
         return
 
     @property
@@ -140,11 +182,11 @@ class StrangeSyntacticParser:
             word_inputs = kl.Input(shape=(None, self.max_word_length + 2), dtype="float32")
             char_layer_params = char_layer_params or dict()
             word_embeddings = build_word_cnn(word_inputs, from_one_hot=False,
-                                             symbols_number=self.symbol_vocabulary.symbols_number_,
+                                             symbols_number=self.symbol_vocabulary_.symbols_number_,
                                              char_embeddings_size=32, **char_layer_params)
         inputs = [word_inputs]
         if self.use_tags:
-            tag_inputs = kl.Input(shape=(None, self.tag_vocabulary.symbol_vector_size_), dtype="float32")
+            tag_inputs = kl.Input(shape=(None, self.tag_vocabulary_.symbol_vector_size_), dtype="float32")
             tag_embeddings = kl.Dense(tag_embeddings_size, activation="relu")(tag_inputs)
             inputs.append(tag_inputs)
             word_embeddings = kl.Concatenate()([word_embeddings, tag_embeddings])
@@ -174,13 +216,13 @@ class StrangeSyntacticParser:
             word_inputs = kl.Input(shape=(None, self.max_word_length + 2), dtype="float32")
             char_layer_params = char_layer_params or dict()
             word_embeddings = build_word_cnn(word_inputs, from_one_hot=False,
-                                             symbols_number=self.symbol_vocabulary.symbols_number_,
+                                             symbols_number=self.symbol_vocabulary_.symbols_number_,
                                              char_embeddings_size=32, **char_layer_params)
         dep_inputs = kl.Input(shape=(None,), dtype="int32")
         head_inputs = kl.Input(shape=(None,), dtype="int32")
         inputs = [word_inputs, dep_inputs, head_inputs]
         if self.use_tags:
-            tag_inputs = kl.Input(shape=(None, self.tag_vocabulary.symbol_vector_size_), dtype="float32")
+            tag_inputs = kl.Input(shape=(None, self.tag_vocabulary_.symbol_vector_size_), dtype="float32")
             tag_embeddings = kl.Dense(tag_embeddings_size, activation="relu")(tag_inputs)
             inputs.append(tag_inputs)
             word_embeddings = kl.Concatenate()([word_embeddings, tag_embeddings])
@@ -195,7 +237,7 @@ class StrangeSyntacticParser:
         state = kl.Concatenate()([dep_states, head_states])
         for units in dense_units:
             state = kl.Dense(units, activation="relu")(state)
-        output = kl.Dense(self.dep_vocab.symbols_number_, activation="softmax")(state)
+        output = kl.Dense(self.dep_vocabulary_.symbols_number_, activation="softmax")(state)
         model = Model(inputs, output)
         model.compile(optimizer=kopt.Adam(clipnorm=5.0), loss="categorical_crossentropy", metrics=["accuracy"])
         print(model.summary())
@@ -213,11 +255,11 @@ class StrangeSyntacticParser:
             char_inputs = kl.Input(shape=(None, self.max_word_length + 2), dtype="float32")
             char_layer_params = char_layer_params or dict()
             word_embeddings = build_word_cnn(char_inputs, from_one_hot=False,
-                                             symbols_number=self.symbol_vocabulary.symbols_number_,
+                                             symbols_number=self.symbol_vocabulary_.symbols_number_,
                                              char_embeddings_size=32, **char_layer_params)
             embeddings.append(word_embeddings)
         if self.use_tags:
-            tag_inputs = kl.Input(shape=(None, self.tag_vocabulary.symbol_vector_size_), dtype="float32")
+            tag_inputs = kl.Input(shape=(None, self.tag_vocabulary_.symbol_vector_size_), dtype="float32")
             tag_embeddings = kl.Dense(tag_embeddings_size, activation="relu")(tag_inputs)
             inputs.append(tag_inputs)
             embeddings.append(tag_embeddings)
@@ -241,7 +283,7 @@ class StrangeSyntacticParser:
         head_embeddings = kl.Lambda(gather_indexes, arguments={"B": head_inputs})(lstm_output)
         dep_encodings = kl.Dropout(dropout)(kl.Dense(state_units, activation="relu")(dep_embeddings))
         head_encodings = kl.Dropout(dropout)(kl.Dense(state_units, activation="relu")(head_embeddings))
-        dep_probs = BiaffineLayer(self.dep_vocab.symbols_number_, state_units,
+        dep_probs = BiaffineLayer(self.dep_vocabulary_.symbols_number_, state_units,
                                   name="deps", use_first_bias=True, use_second_bias=True,
                                   use_label_bias=True, activation="softmax")([dep_encodings, head_encodings])
         outputs = [head_probs, dep_probs]
@@ -262,26 +304,27 @@ class StrangeSyntacticParser:
         for i, word in enumerate(sent):
             word = word[-self.max_word_length:]
             answer[i, 0], answer[i, len(word) + 1] = BEGIN, END
-            answer[i, 1:len(word) + 1] = self.symbol_vocabulary.toidx(word)
+            answer[i, 1:len(word) + 1] = self.symbol_vocabulary_.toidx(word)
         return answer[0] if from_word else answer
 
     def _transform_data(self, sents, to_train=False):
         sents = [[process_word(word, to_lower=True, append_case="first",
                                special_tokens=["<s>", "</s>"]) for word in sent] for sent in sents]
         if to_train:
-            self.symbol_vocabulary = Vocabulary(character=True, min_count=3).train(sents)
+            self.symbol_vocabulary_ = Vocabulary(character=True, min_count=3).train(sents)
         sents = [self._recode(sent) for sent in sents]
         return sents
 
     def _transform_tags(self, sents, to_train=False):
         sents = [['BEGIN'] + sent + ['END'] for sent in sents]
         if to_train:
-            self.tag_vocabulary = FeatureVocabulary(min_count=3).train(sents)
-        answer = [[self.tag_vocabulary.to_vector(x, return_vector=True) for x in sent] for sent in sents]
+            self.tag_vocabulary_ = FeatureVocabulary(min_count=3).train(sents)
+        answer = [[self.tag_vocabulary_.to_vector(x, return_vector=True) for x in sent] for sent in sents]
         return answer
 
     def train(self, sents, heads, deps, dev_sents=None, dev_heads=None, dev_deps=None,
-              tags=None, dev_tags=None):
+              tags=None, dev_tags=None, save_file=None, model_file=None,
+              head_model_file=None, dep_model_file=None):
         sents, heads, deps = pad_data(sents, heads, deps)
         if self.use_char_model:
             sent_data = self._transform_data(sents, to_train=True)
@@ -297,7 +340,7 @@ class StrangeSyntacticParser:
             dev_tag_data = self._transform_tags(dev_tags) if self.use_tags else None
         else:
             dev_sent_data, dev_heads, dev_deps, dev_tag_data = None, None, None, None
-        self.dep_vocab = Vocabulary(min_count=3).train(deps)
+        self.dep_vocabulary_ = Vocabulary(min_count=3).train(deps)
         if self.use_joint_model:
             self.train_joint_model(sents, sent_data, heads, deps,
                                    dev_sents, dev_sent_data, dev_heads, dev_deps,
@@ -307,6 +350,8 @@ class StrangeSyntacticParser:
                                   tags=tag_data, dev_tags=dev_tag_data, **self.head_train_params)
             self.train_dep_model(sent_data, heads, deps, dev_sent_data, dev_heads, dev_deps,
                                  tags=tag_data, dev_tags=dev_tag_data, **self.dep_train_params)
+        if save_file is not None:
+            self.to_json(save_file, model_file, head_model_file, dep_model_file)
         return self
 
     def train_joint_model(self, sent_data, sents, heads, deps,
@@ -316,10 +361,10 @@ class StrangeSyntacticParser:
         self.model_, self.head_model_, self.dep_model_ = self.build_Dozat_network(**self.model_params)
         gen_params = {"embedder": self.embedder, "batch_size": batch_size,
                       "classes_number": DataGenerator.POSITIONS_AS_CLASSES,
-                      "additional_classes_number": [self.dep_vocab.symbols_number_],
+                      "additional_classes_number": [self.dep_vocabulary_.symbols_number_],
                       "additional_target_paddings": [PAD]}
         dep_indexes, head_indexes, dep_codes = \
-            make_indexes_for_syntax(heads, deps, dep_vocab=self.dep_vocab, to_pad=False)
+            make_indexes_for_syntax(heads, deps, dep_vocab=self.dep_vocabulary_, to_pad=False)
         # все входные данные
         data = [sent_data, sents, tags, dep_indexes, head_indexes]
         paddings = [PAD] * 3 + [DataGenerator.POSITION_AS_PADDING] * 2
@@ -332,7 +377,7 @@ class StrangeSyntacticParser:
                                   **gen_params)
         if dev_sent_data is not None:
             dev_dep_indexes, dev_head_indexes, dev_dep_codes = \
-                make_indexes_for_syntax(dev_heads, dev_deps, dep_vocab=self.dep_vocab, to_pad=False)
+                make_indexes_for_syntax(dev_heads, dev_deps, dep_vocab=self.dep_vocabulary_, to_pad=False)
             dev_data = [dev_sent_data, dev_sents, dev_tags, dev_dep_indexes, dev_head_indexes]
             additional_dev_data = [dev_data[i] for i in additional_input_indexes]
             dev_gen = DataGenerator(dev_data[self.first_input_index], targets=dev_heads,
@@ -377,8 +422,8 @@ class StrangeSyntacticParser:
                         tags=None, dev_tags=None, nepochs=2, batch_size=16, patience=1):
         self.dep_model_ = self.build_dep_network(**self.dep_model_params)
         dep_indexes, head_indexes, dep_codes =\
-            make_indexes_for_syntax(heads, deps, dep_vocab=self.dep_vocab, to_pad=False)
-        dep_gen_params = {"embedder": self.embedder, "classes_number": self.dep_vocab.symbols_number_,
+            make_indexes_for_syntax(heads, deps, dep_vocab=self.dep_vocabulary_, to_pad=False)
+        dep_gen_params = {"embedder": self.embedder, "classes_number": self.dep_vocabulary_.symbols_number_,
                           "batch_size": batch_size, "target_padding": PAD,
                           "additional_padding": [DataGenerator.POSITION_AS_PADDING] * 2}
         additional_data = [dep_indexes, head_indexes]
@@ -388,7 +433,7 @@ class StrangeSyntacticParser:
         train_gen = DataGenerator(sents, targets=dep_codes, additional_data=additional_data, **dep_gen_params)
         if dev_sents is not None:
             dev_dep_indexes, dev_head_indexes, dev_dep_codes = \
-                make_indexes_for_syntax(dev_heads, dev_deps, dep_vocab=self.dep_vocab, to_pad=False)
+                make_indexes_for_syntax(dev_heads, dev_deps, dep_vocab=self.dep_vocabulary_, to_pad=False)
             additional_data = [dev_dep_indexes, dev_head_indexes]
             if self.use_tags:
                 additional_data.append(dev_tags)
@@ -462,7 +507,7 @@ class StrangeSyntacticParser:
             for i, index in enumerate(indexes):
                 L = len(sents[index])
                 curr_labels = batch_labels[i][1:L - 1]
-                answer[index] = [self.dep_vocab.symbols_[elem] for elem in curr_labels]
+                answer[index] = [self.dep_vocabulary_.symbols_[elem] for elem in curr_labels]
         return answer
 
 
