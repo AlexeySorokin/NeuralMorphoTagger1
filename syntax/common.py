@@ -3,6 +3,7 @@ from common.common import BEGIN, END, PAD
 from deeppavlov import build_model, configs
 from deeppavlov.core.common.params import from_params
 from deeppavlov.core.commands.utils import parse_config
+from deeppavlov.models.embedders.glove_embedder import GloVeEmbedder
 
 
 def load_elmo(elmo_output_names=("lstm_outputs1",)):
@@ -12,6 +13,9 @@ def load_elmo(elmo_output_names=("lstm_outputs1",)):
     embedder = from_params(elmo_config)
     return embedder
 
+def load_glove(load_path="dump/embedders/glove_ru_100000.vec"):
+    embedder = GloVeEmbedder(load_path=load_path, pad_zero=True)
+    return embedder
 
 def pad_data(words, heads=None, deps=None):
     if words[0][0] != "<s>":

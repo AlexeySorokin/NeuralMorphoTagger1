@@ -19,7 +19,7 @@ from common.generate import DataGenerator
 from common.common import BEGIN, END, PAD
 from common.common import gather_indexes
 from common.cells import BiaffineAttention, BiaffineLayer, build_word_cnn
-from syntax.common import pad_data, load_elmo, make_indexes_for_syntax
+from syntax.common import pad_data, load_elmo, load_glove, make_indexes_for_syntax
 from dependency_decoding import chu_liu_edmonds
 
 from deeppavlov import build_model, configs
@@ -74,8 +74,10 @@ def load_parser(infile):
     with open(infile, "r", encoding="utf8") as fin:
         config = json.load(fin)
     embedder = config.pop("embedder", None)
-    if embedder is not None:
+    if embedder == "elmo":
         embedder = load_elmo()
+    elif embedder == "glove":
+        embedder = load_glove()
     config["embedder"] = embedder
     vocabulary_keys = [key for key in config if key.endswith("vocabulary_")]
     vocab_config = {key: vocabulary_from_json(
@@ -130,7 +132,6 @@ class StrangeSyntacticParser:
         info = dict()
         outdir = os.path.dirname(outfile)
         for (attr, val) in inspect.getmembers(self):
-            print(attr)
             if not (attr.startswith("__") or inspect.ismethod(val) or
                     isinstance(getattr(StrangeSyntacticParser, attr, None), property) or
                     isinstance(val, np.ndarray) or
@@ -253,6 +254,7 @@ class StrangeSyntacticParser:
             embeddings.append(word_inputs)
         if self.use_char_model:
             char_inputs = kl.Input(shape=(None, self.max_word_length + 2), dtype="float32")
+            inputs.append(char_inputs)
             char_layer_params = char_layer_params or dict()
             word_embeddings = build_word_cnn(char_inputs, from_one_hot=False,
                                              symbols_number=self.symbol_vocabulary_.symbols_number_,
@@ -323,15 +325,15 @@ class StrangeSyntacticParser:
         return answer
 
     def train(self, sents, heads, deps, dev_sents=None, dev_heads=None, dev_deps=None,
-              tags=None, dev_tags=None, save_file=None, model_file=None,
+              tags=None, dev_tags=None, to_build=True, save_file=None, model_file=None,
               head_model_file=None, dep_model_file=None):
         sents, heads, deps = pad_data(sents, heads, deps)
         if self.use_char_model:
-            sent_data = self._transform_data(sents, to_train=True)
+            sent_data = self._transform_data(sents, to_train=to_build)
         else:
             sent_data = sents
         if tags is not None:
-            tag_data = self._transform_tags(tags, to_train=True)
+            tag_data = self._transform_tags(tags, to_train=to_build)
         else:
             tag_data = None
         if dev_sents is not None:
@@ -340,11 +342,14 @@ class StrangeSyntacticParser:
             dev_tag_data = self._transform_tags(dev_tags) if self.use_tags else None
         else:
             dev_sent_data, dev_heads, dev_deps, dev_tag_data = None, None, None, None
-        self.dep_vocabulary_ = Vocabulary(min_count=3).train(deps)
+        # self.dep_vocabulary_ = Vocabulary(min_count=3)
+        if to_build:
+            self.dep_vocabulary_= Vocabulary(min_count=3).train(deps)
         if self.use_joint_model:
             self.train_joint_model(sents, sent_data, heads, deps,
                                    dev_sents, dev_sent_data, dev_heads, dev_deps,
-                                   tags=tag_data, dev_tags=dev_tag_data, **self.train_params)
+                                   tags=tag_data, dev_tags=dev_tag_data, to_build=to_build,
+                                   **self.train_params)
         else:
             self.train_head_model(sent_data, heads, dev_sent_data, dev_heads,
                                   tags=tag_data, dev_tags=dev_tag_data, **self.head_train_params)
@@ -356,9 +361,10 @@ class StrangeSyntacticParser:
 
     def train_joint_model(self, sent_data, sents, heads, deps,
                           dev_sent_data, dev_sents, dev_heads, dev_deps,
-                          tags=None, dev_tags=None,
+                          tags=None, dev_tags=None, to_build=True,
                           nepochs=3, batch_size=16, patience=1):
-        self.model_, self.head_model_, self.dep_model_ = self.build_Dozat_network(**self.model_params)
+        if to_build:
+            self.model_, self.head_model_, self.dep_model_ = self.build_Dozat_network(**self.model_params)
         gen_params = {"embedder": self.embedder, "batch_size": batch_size,
                       "classes_number": DataGenerator.POSITIONS_AS_CLASSES,
                       "additional_classes_number": [self.dep_vocabulary_.symbols_number_],
@@ -374,7 +380,7 @@ class StrangeSyntacticParser:
         gen_params["additional_padding"] = [paddings[i] for i in additional_input_indexes]
         train_gen = DataGenerator(data[self.first_input_index], targets=heads,
                                   additional_data=additional_data,  additional_targets=[dep_codes],
-                                  **gen_params)
+                                  shuffle=True, **gen_params)
         if dev_sent_data is not None:
             dev_dep_indexes, dev_head_indexes, dev_dep_codes = \
                 make_indexes_for_syntax(dev_heads, dev_deps, dep_vocab=self.dep_vocabulary_, to_pad=False)
@@ -382,13 +388,15 @@ class StrangeSyntacticParser:
             additional_dev_data = [dev_data[i] for i in additional_input_indexes]
             dev_gen = DataGenerator(dev_data[self.first_input_index], targets=dev_heads,
                                     additional_data=additional_dev_data,
-                                    additional_targets=[dev_dep_codes], shuffle=False, **gen_params)
+                                    additional_targets=[dev_dep_codes],
+                                    shuffle=False, **gen_params)
             validation_steps = dev_gen.steps_per_epoch
         else:
             dev_gen, validation_steps = None, None
         callbacks = []
         if patience >= 0:
             callbacks.append(EarlyStopping(monitor="val_heads_acc", restore_best_weights=True, patience=patience))
+        # print(nepochs)
         self.model_.fit_generator(train_gen, train_gen.steps_per_epoch,
                                   validation_data=dev_gen,
                                   validation_steps=validation_steps,
