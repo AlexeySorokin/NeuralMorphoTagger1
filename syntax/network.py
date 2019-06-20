@@ -110,7 +110,7 @@ class StrangeSyntacticParser:
                  head_model_params=None, dep_model_params=None,
                  head_train_params=None, dep_train_params=None,
                  model_params=None, train_params=None,
-                 char_layer_params=None):
+                 char_layer_params=None, min_edge_prob=0.01):
         self.use_joint_model = use_joint_model
         self.embedder = embedder
         self.use_tags = use_tags
@@ -123,6 +123,7 @@ class StrangeSyntacticParser:
         self.model_params = model_params or dict()
         self.train_params = train_params or dict()
         self.char_layer_params = char_layer_params or dict()
+        self.min_edge_prob = min_edge_prob
         self.head_model_params["char_layer_params"] = self.char_layer_params
         self.dep_model_params["char_layer_params"] = self.char_layer_params
         if self.embedder is None and not self.use_char_model and not self.use_tags:
@@ -460,7 +461,7 @@ class StrangeSyntacticParser:
                                       callbacks=callbacks, epochs=nepochs)
         return self
 
-    def predict(self, sents, tags=None):
+    def predict(self, sents, tags=None, return_probs=False):
         sents = pad_data(sents)
         if self.use_char_model:
             sent_data = self._transform_data(sents, to_train=False)
@@ -472,7 +473,10 @@ class StrangeSyntacticParser:
             tag_data = None
         head_probs, chl_pred_heads = self.predict_heads(sents, sent_data, tag_data)
         deps = self.predict_deps(sents, sent_data, chl_pred_heads, tag_data)
-        return chl_pred_heads, deps
+        answer = [chl_pred_heads, deps]
+        if return_probs:
+            answer.append(head_probs)
+        return tuple(answer)
 
     def predict_heads(self, sents, sent_data, tags=None):
         probs, heads = [None] * len(sents), [None] * len(sents)
@@ -492,7 +496,11 @@ class StrangeSyntacticParser:
                 curr_probs /= np.sum(curr_probs, axis=-1)
                 probs[index] = curr_probs
                 heads[index] = np.argmax(curr_probs[1:], axis=-1)
-        chl_pred_heads = [chu_liu_edmonds(elem.astype("float64"))[0][1:] for elem in probs]
+        log_probs = [np.log10(np.maximum(self.min_edge_prob, elem)) - np.log10(self.min_edge_prob) for elem in probs]
+        for elem in log_probs:
+            elem[1:,0] += np.log10(self.min_edge_prob) * len(elem)
+        chl_data = [chu_liu_edmonds(elem.astype("float64")) for elem in log_probs]
+        chl_pred_heads = [elem[0][1:] for elem in chl_data]
         return probs, chl_pred_heads
 
     def predict_deps(self, sents, sent_data, heads, tags=None):
