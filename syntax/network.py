@@ -11,7 +11,7 @@ import keras.optimizers as kopt
 from keras.layers import Layer
 from keras import Model
 from keras.engine.topology import InputSpec
-from keras.callbacks import EarlyStopping
+from keras.callbacks import EarlyStopping, ModelCheckpoint
 
 from common.read import read_syntax_infile, process_word, make_UD_pos_and_tag
 from common.vocabulary import Vocabulary, FeatureVocabulary, vocabulary_from_json
@@ -19,7 +19,8 @@ from common.generate import DataGenerator
 from common.common import BEGIN, END, PAD
 from common.common import gather_indexes
 from common.cells import BiaffineAttention, BiaffineLayer, build_word_cnn
-from syntax.common import pad_data, load_elmo, load_glove, make_indexes_for_syntax
+from common.cells import MultilabelSigmoidAccuracy, MultilabelSigmoidLoss
+from syntax.common import pad_data, load_elmo, load_glove, make_indexes_for_syntax, reverse_heads
 from dependency_decoding import chu_liu_edmonds
 
 from deeppavlov import build_model, configs
@@ -107,6 +108,7 @@ class StrangeSyntacticParser:
 
     def __init__(self, use_joint_model=True, embedder=None, use_tags=False,
                  use_char_model=False, max_word_length=MAX_WORD_LENGTH,
+                 to_predict_children=False,
                  head_model_params=None, dep_model_params=None,
                  head_train_params=None, dep_train_params=None,
                  model_params=None, train_params=None,
@@ -116,6 +118,7 @@ class StrangeSyntacticParser:
         self.use_tags = use_tags
         self.use_char_model = use_char_model
         self.max_word_length = max_word_length
+        self.to_predict_children = to_predict_children
         self.head_model_params = head_model_params or dict()
         self.dep_model_params = dep_model_params or dict()
         self.head_train_params = head_train_params or dict()
@@ -289,12 +292,25 @@ class StrangeSyntacticParser:
         dep_probs = BiaffineLayer(self.dep_vocabulary_.symbols_number_, state_units,
                                   name="deps", use_first_bias=True, use_second_bias=True,
                                   use_label_bias=True, activation="softmax")([dep_encodings, head_encodings])
-        outputs = [head_probs, dep_probs]
-        model = Model(inputs, outputs)
-        model.compile(optimizer=kopt.Adam(clipnorm=5.0), loss=["categorical_crossentropy"] * 2,
-                      loss_weights=[1.0, 1.0], metrics=["accuracy"])
-        head_model = kb.Function(inputs[:-2] + [kb.learning_phase()], [head_probs])
+        outputs, head_model_output = [head_probs, dep_probs], [head_probs]
+        # head_model = kb.Function(inputs[:-2] + [kb.learning_phase()], [head_probs])
+        loss, loss_weights = ["categorical_crossentropy"] * 2, [1.0, 1.0]
+        metrics = {"heads": "accuracy", "deps": "accuracy"}
+        if self.to_predict_children:
+            head_encodings = kl.Dropout(dropout)(kl.Dense(state_units, activation="relu")(lstm_output))
+            dep_encodings = kl.Dropout(dropout)(kl.Dense(state_units, activation="relu")(lstm_output))
+            similarities = BiaffineAttention(state_units, use_first_bias=True)([head_encodings, dep_encodings])
+            child_probs = kl.Activation("sigmoid", name="children")(similarities)
+            outputs.append(child_probs)
+            child_model = kb.Function(inputs[:-2] + [kb.learning_phase()], [child_probs])
+            loss.append(MultilabelSigmoidLoss(axis=-2))
+            loss_weights.append(1.0)
+            metrics["children"] = MultilabelSigmoidAccuracy(axis=-2)
+            head_model_output.append(child_probs)
+        head_model = kb.Function(inputs[:-2] + [kb.learning_phase()], head_model_output)
         dep_model = kb.Function(inputs + [kb.learning_phase()], [dep_probs])
+        model = Model(inputs, outputs)
+        model.compile(optimizer=kopt.Adam(clipnorm=5.0), loss=loss, loss_weights=loss_weights, metrics=metrics)
         print(model.summary())
         return model, head_model, dep_model
 
@@ -327,7 +343,13 @@ class StrangeSyntacticParser:
 
     def train(self, sents, heads, deps, dev_sents=None, dev_heads=None, dev_deps=None,
               tags=None, dev_tags=None, to_build=True, save_file=None, model_file=None,
-              head_model_file=None, dep_model_file=None):
+              head_model_file=None, dep_model_file=None, train_params=None):
+        if train_params is None:
+            train_params = self.train_params
+        # if self.to_predict_children:
+        #     heads = [reverse_heads(elem) for elem in heads]
+        #     if dev_sents is not None:
+        #         dev_heads = [reverse_heads(elem) for elem in dev_heads]
         sents, heads, deps = pad_data(sents, heads, deps)
         if self.use_char_model:
             sent_data = self._transform_data(sents, to_train=to_build)
@@ -350,7 +372,7 @@ class StrangeSyntacticParser:
             self.train_joint_model(sents, sent_data, heads, deps,
                                    dev_sents, dev_sent_data, dev_heads, dev_deps,
                                    tags=tag_data, dev_tags=dev_tag_data, to_build=to_build,
-                                   **self.train_params)
+                                   model_file=model_file, **train_params)
         else:
             self.train_head_model(sent_data, heads, dev_sent_data, dev_heads,
                                   tags=tag_data, dev_tags=dev_tag_data, **self.head_train_params)
@@ -363,13 +385,18 @@ class StrangeSyntacticParser:
     def train_joint_model(self, sent_data, sents, heads, deps,
                           dev_sent_data, dev_sents, dev_heads, dev_deps,
                           tags=None, dev_tags=None, to_build=True,
-                          nepochs=3, batch_size=16, patience=1):
+                          nepochs=3, batch_size=16, patience=1, model_file=None):
         if to_build:
             self.model_, self.head_model_, self.dep_model_ = self.build_Dozat_network(**self.model_params)
+        additional_classes_number = [self.dep_vocabulary_.symbols_number_]
+        additional_target_paddings = [PAD]
+        if self.to_predict_children:
+            additional_classes_number.append(DataGenerator.POSITIONS_AS_CLASSES)
+            additional_target_paddings.append(PAD)
         gen_params = {"embedder": self.embedder, "batch_size": batch_size,
                       "classes_number": DataGenerator.POSITIONS_AS_CLASSES,
-                      "additional_classes_number": [self.dep_vocabulary_.symbols_number_],
-                      "additional_target_paddings": [PAD]}
+                      "additional_classes_number": additional_classes_number,
+                      "additional_target_paddings": additional_target_paddings}
         dep_indexes, head_indexes, dep_codes = \
             make_indexes_for_syntax(heads, deps, dep_vocab=self.dep_vocabulary_, to_pad=False)
         # все входные данные
@@ -379,24 +406,33 @@ class StrangeSyntacticParser:
         # используемые входные данные
         additional_data = [data[i] for i in additional_input_indexes]
         gen_params["additional_padding"] = [paddings[i] for i in additional_input_indexes]
+        additional_targets = [dep_codes, heads] if self.to_predict_children else [dep_codes]
         train_gen = DataGenerator(data[self.first_input_index], targets=heads,
-                                  additional_data=additional_data,  additional_targets=[dep_codes],
+                                  additional_data=additional_data,
+                                  additional_targets=additional_targets,
                                   shuffle=True, **gen_params)
         if dev_sent_data is not None:
             dev_dep_indexes, dev_head_indexes, dev_dep_codes = \
                 make_indexes_for_syntax(dev_heads, dev_deps, dep_vocab=self.dep_vocabulary_, to_pad=False)
             dev_data = [dev_sent_data, dev_sents, dev_tags, dev_dep_indexes, dev_head_indexes]
             additional_dev_data = [dev_data[i] for i in additional_input_indexes]
+            additional_targets = [dev_dep_codes]
+            if self.to_predict_children:
+                additional_targets.append(dev_heads)
             dev_gen = DataGenerator(dev_data[self.first_input_index], targets=dev_heads,
                                     additional_data=additional_dev_data,
-                                    additional_targets=[dev_dep_codes],
+                                    additional_targets=additional_targets,
                                     shuffle=False, **gen_params)
             validation_steps = dev_gen.steps_per_epoch
         else:
             dev_gen, validation_steps = None, None
         callbacks = []
         if patience >= 0:
-            callbacks.append(EarlyStopping(monitor="val_heads_acc", restore_best_weights=True, patience=patience))
+            callbacks.append(EarlyStopping(
+                monitor="val_heads_acc", restore_best_weights=True, patience=patience))
+        if model_file is not None:
+            callbacks.append(ModelCheckpoint(model_file, monitor="val_heads_acc",
+                                             save_best_only=True, save_weights_only=True))
         # print(nepochs)
         self.model_.fit_generator(train_gen, train_gen.steps_per_epoch,
                                   validation_data=dev_gen,
@@ -487,7 +523,10 @@ class StrangeSyntacticParser:
                                  shuffle=False, nepochs=1)
         for batch_index, (batch, indexes) in enumerate(test_gen):
             if self.use_joint_model:
-                batch_probs = self.head_model_(batch + [0])[0]
+                predictions = self.head_model_(batch + [0])
+                batch_probs = predictions[0]
+                if self.to_predict_children:
+                    batch_probs *= predictions[1]
             else:
                 batch_probs = self.head_model_.predict(batch)
             for i, index in enumerate(indexes):
@@ -498,6 +537,7 @@ class StrangeSyntacticParser:
                 heads[index] = np.argmax(curr_probs[1:], axis=-1)
         log_probs = [np.log10(np.maximum(self.min_edge_prob, elem)) - np.log10(self.min_edge_prob) for elem in probs]
         for elem in log_probs:
+            # to prevent multiple roots
             elem[1:,0] += np.log10(self.min_edge_prob) * len(elem)
         chl_data = [chu_liu_edmonds(elem.astype("float64")) for elem in log_probs]
         chl_pred_heads = [elem[0][1:] for elem in chl_data]

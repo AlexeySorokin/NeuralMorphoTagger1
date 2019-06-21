@@ -17,10 +17,10 @@ def load_glove(load_path="dump/embedders/glove_ru_100000.vec"):
     embedder = GloVeEmbedder(load_path=load_path, pad_zero=True)
     return embedder
 
-def pad_data(words, heads=None, deps=None):
+def pad_data(words, heads=None, deps=None, to_pad_heads=True):
     if words[0][0] != "<s>":
         words = [["<s>"] + elem + ["</s>"] for elem in words]
-        if heads is not None:
+        if heads is not None and to_pad_heads:
             heads = [[0] + elem + [len(elem)+1] for elem in heads]
         if deps is not None:
             deps = [['BEGIN'] + elem + ["END"] for elem in deps]
@@ -50,3 +50,10 @@ def make_indexes_for_syntax(heads, deps=None, dep_vocab=None, to_pad=True):
             dep_codes.append(curr_dep_codes)
         return dep_indexes, head_indexes, dep_codes
     return dep_indexes, head_indexes
+
+
+def reverse_heads(sent):
+    answer = [[] for _ in  range(len(sent) + 2)]
+    for i, elem in enumerate(sent):
+        answer[elem].append(i)
+    return answer

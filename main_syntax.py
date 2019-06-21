@@ -8,13 +8,13 @@ from common.read import read_syntax_infile, read_UD_file, read_tags_infile
 
 USE_TAGS = True
 MAX_SENTS, MAX_DEV_SENTS, MAX_TEST_SENTS = -1, -1, -1
-LOAD_FILE = "syntax/models/model.json"
-TO_TRAIN, TO_TEST = False, True
-SAVE_FILE = "syntax/models/model.json"
-MODEL_FILE = "syntax/models/model.hdf5"
-EMBEDDER_MODE = "glove"
-OUTFILE = "syntax/dump/analysis-model-log.out"
-
+LOAD_FILE = "syntax/models/model-child.json" # "syntax/models/model.json"
+TO_TRAIN, TO_TEST = True, True
+SAVE_FILE = "syntax/models/model-child.json"
+MODEL_FILE = "syntax/models/model-child.hdf5"
+EMBEDDER_MODE = "elmo"
+OUTFILE = "syntax/dump/analysis-model-child.out"
+TO_PREDICT_CHILDREN = True
 
 def dump_output(outfile, sents, tags, heads, deps, pred_heads, pred_deps, pred_probs=None):
     with open(outfile, "w", encoding="utf8") as fout:
@@ -40,14 +40,18 @@ if __name__ == "__main__":
     config = tf.ConfigProto()
     config.gpu_options.per_process_gpu_memory_fraction = 0.4
     kbt.set_session(tf.Session(config=config))
+    train_params = {"nepochs": 18, "patience": 3}
     if LOAD_FILE is not None:
+        to_build = False
         parser = load_parser(LOAD_FILE)
     else:
+        to_build = True
         embedder = (load_elmo() if EMBEDDER_MODE == "elmo" else
                     load_glove("dump/embedders/glove_ru_100000.vec") if EMBEDDER_MODE == "glove" else
                     None)
-        parser = StrangeSyntacticParser(embedder=embedder, use_char_model=True, use_tags=USE_TAGS,
-                                        use_joint_model=True, train_params={"nepochs": 20, "patience": 3},
+        parser = StrangeSyntacticParser(embedder=embedder, use_char_model=True,
+                                        use_tags=USE_TAGS, to_predict_children=TO_PREDICT_CHILDREN,
+                                        use_joint_model=True, train_params=train_params,
                                         model_params={"lstm_layers": 1, "lstm_size": 128},
                                         char_layer_params={"char_window_size": [1, 2, 3, 4, 5, 6, 7],
                                                            "char_embeddings_size": 32, "char_filter_multiple": 25}
@@ -63,8 +67,8 @@ if __name__ == "__main__":
                                                             to_process_word=False)
         dev_tags = read_tags_infile(dev_file, max_sents=MAX_DEV_SENTS, to_shuffle=False) if USE_TAGS else False
         parser.train(sents, heads, deps, dev_sents, dev_heads, dev_deps,
-                     tags=tags, dev_tags=dev_tags,
-                     save_file=SAVE_FILE, model_file=MODEL_FILE)
+                     tags=tags, dev_tags=dev_tags, to_build=to_build,
+                     save_file=SAVE_FILE, model_file=MODEL_FILE, train_params=train_params)
     if TO_TEST:
         test_file = "/home/alexeysorokin/data/Data/UD2.3/UD_Russian-SynTagRus/ru_syntagrus-ud-test.conllu"
         test_sents, test_heads, test_deps = read_syntax_infile(

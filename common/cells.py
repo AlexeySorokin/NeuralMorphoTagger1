@@ -209,28 +209,32 @@ class BiaffineLayer(kl.Layer):
 
 class MultilabelSigmoidLoss:
 
-    def __init__(self, alpha=1.0, beta=1.0):
+    def __init__(self, alpha=1.0, beta=1.0, axis=-1):
         self.alpha = alpha
         self.beta = beta
+        self.axis= axis
 
     def __call__(self, y_true, y_pred):
         y_pred = kb.clip(y_pred, kb.epsilon(), 1.0 - kb.epsilon())
         positive_loss = -y_true * kb.log(y_pred)
-        negative_loss = -(1 - y_true) * (1.0 - y_pred)
+        negative_loss = -(1 - y_true) * kb.log(1.0 - y_pred)
+        positive_loss = kb.max(positive_loss, axis=self.axis)
+        negative_loss = kb.max(negative_loss, axis=self.axis)
         loss = self.alpha * positive_loss + self.beta * negative_loss
         return loss
 
 
 class MultilabelSigmoidAccuracy:
 
-    def __init__(self, threshold=0.5):
+    def __init__(self, threshold=0.5, axis=-1):
         self.threshold = kb.constant(threshold)
+        self.axis = axis
         self.__name__ = "multilabel_sigmoid_accuracy"
 
     def __call__(self, y_true, y_pred):
-        is_positive = kb.greater(y_pred, self.threshold)
+        is_positive = kb.cast(kb.greater(y_pred, self.threshold), dtype=kb.floatx())
         are_equal = kb.cast(kb.equal(y_true, is_positive), dtype=kb.floatx())
-        return kb.min(are_equal, axis=-1)
+        return kb.min(are_equal, axis=self.axis)
 
 
 
