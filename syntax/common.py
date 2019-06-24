@@ -6,6 +6,17 @@ from deeppavlov.core.commands.utils import parse_config
 from deeppavlov.models.embedders.glove_embedder import GloVeEmbedder
 
 
+def load_embeddings(embedder_mode, **kwargs):
+    if embedder_mode == "elmo":
+        embedder_func = load_elmo
+    elif embedder_mode == "glove":
+        embedder_func = load_glove
+    elif embedder_mode is not None:
+        raise ValueError("Wrong embedder mode: {}".format(embedder_mode))
+    else:
+        return None
+    return embedder_func(**kwargs)
+
 def load_elmo(elmo_output_names=("lstm_outputs1",)):
     config = parse_config(getattr(configs.elmo_embedder, "elmo_ru-news"))
     elmo_config = config["chainer"]["pipe"][-1]
@@ -13,7 +24,7 @@ def load_elmo(elmo_output_names=("lstm_outputs1",)):
     embedder = from_params(elmo_config)
     return embedder
 
-def load_glove(load_path="dump/embedders/glove_ru_100000.vec"):
+def load_glove(load_path):
     embedder = GloVeEmbedder(load_path=load_path, pad_zero=True)
     return embedder
 

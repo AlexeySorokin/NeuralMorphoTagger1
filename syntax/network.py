@@ -20,8 +20,10 @@ from common.common import BEGIN, END, PAD
 from common.common import gather_indexes
 from common.cells import BiaffineAttention, BiaffineLayer, build_word_cnn
 from common.cells import MultilabelSigmoidAccuracy, MultilabelSigmoidLoss
-from syntax.common import pad_data, load_elmo, load_glove, make_indexes_for_syntax, reverse_heads
+from syntax.common import pad_data, load_embeddings, make_indexes_for_syntax, reverse_heads
+
 from dependency_decoding import chu_liu_edmonds
+from keras_transformer.position import AddPositionalEncoding
 
 from deeppavlov import build_model, configs
 from deeppavlov.core.common.params import from_params
@@ -54,32 +56,15 @@ class PositionEmbedding(Layer):
         return output_shape
 
 
-def load_syntactic_parser(infile):
-    with open(infile, "r", encoding="utf8") as fin:
-        config = json.load(fin)
-    info = {key: config.get(key) for key in ["head_model_params", "dep_model_params",
-                                             "head_train_params", "dep_train_params"]}
-    embedder = load_elmo()
-    parser = StrangeSyntacticParser(embedder=embedder, **info)
-    parser.dep_vocabulary_ = vocabulary_from_json(config["dep_vocab"])
-    parser.head_model = parser.build_head_network(**parser.head_model_params)
-    parser.dep_model = parser.build_dep_network(**parser.dep_model_params)
-    if "head_model_save_file" in config:
-        parser.head_model.load_weights(config["head_model_save_file"])
-    if "dep_model_save_file" in config:
-        parser.dep_model.load_weights(config["dep_model_save_file"])
-    return parser
-
-
 def load_parser(infile):
     with open(infile, "r", encoding="utf8") as fin:
         config = json.load(fin)
-    embedder = config.pop("embedder", None)
-    if embedder == "elmo":
-        embedder = load_elmo()
-    elif embedder == "glove":
-        embedder = load_glove()
-    config["embedder"] = embedder
+    # embedder = config.pop("embedder", None)
+    # if embedder == "elmo":
+    #     embedder = load_elmo()
+    # elif embedder == "glove":
+    #     embedder = load_glove()
+    # config["embedder"] = embedder
     vocabulary_keys = [key for key in config if key.endswith("vocabulary_")]
     vocab_config = {key: vocabulary_from_json(
                         config.pop(key), use_features=(key=="tag_vocabulary_"))
@@ -106,19 +91,22 @@ class StrangeSyntacticParser:
 
     MAX_WORD_LENGTH = 30
 
-    def __init__(self, use_joint_model=True, embedder=None, use_tags=False,
-                 use_char_model=False, max_word_length=MAX_WORD_LENGTH,
-                 to_predict_children=False,
+    def __init__(self, embedder=None, embedder_params=None,
+                 use_joint_model=True, use_tags=True,
+                 use_char_model=True, max_word_length=MAX_WORD_LENGTH,
+                 to_predict_children=True, use_positional_encoding=False,
                  head_model_params=None, dep_model_params=None,
                  head_train_params=None, dep_train_params=None,
                  model_params=None, train_params=None,
                  char_layer_params=None, min_edge_prob=0.01):
         self.use_joint_model = use_joint_model
         self.embedder = embedder
+        self.embedder_params = embedder_params or dict()
         self.use_tags = use_tags
         self.use_char_model = use_char_model
         self.max_word_length = max_word_length
         self.to_predict_children = to_predict_children
+        self.use_positional_encoding = use_positional_encoding
         self.head_model_params = head_model_params or dict()
         self.dep_model_params = dep_model_params or dict()
         self.head_train_params = head_train_params or dict()
@@ -131,6 +119,10 @@ class StrangeSyntacticParser:
         self.dep_model_params["char_layer_params"] = self.char_layer_params
         if self.embedder is None and not self.use_char_model and not self.use_tags:
             raise ValueError("")
+        if self.embedder in ["elmo", "glove"]:
+            self.embedder_ = load_embeddings(self.embedder, **self.embedder_params)
+        else:
+            self.embedder_ = None
 
     def to_json(self, outfile, model_file=None, head_model_file=None, dep_model_file=None):
         info = dict()
@@ -181,7 +173,7 @@ class StrangeSyntacticParser:
                            activation="relu", char_layer_params=None,
                            tag_embeddings_size=64):
         if self.embedder is not None:
-            word_inputs = kl.Input(shape=(None, self.embedder.dim), dtype="float32")
+            word_inputs = kl.Input(shape=(None, self.embedder_.dim), dtype="float32")
             word_embeddings = word_inputs
         else:
             word_inputs = kl.Input(shape=(None, self.max_word_length + 2), dtype="float32")
@@ -215,7 +207,7 @@ class StrangeSyntacticParser:
         dense_units = dense_units or []
         char_layer_params = char_layer_params or dict()
         if self.embedder is not None:
-            word_inputs = kl.Input(shape=(None, self.embedder.dim), dtype="float32")
+            word_inputs = kl.Input(shape=(None, self.embedder_.dim), dtype="float32")
             word_embeddings = word_inputs
         else:
             word_inputs = kl.Input(shape=(None, self.max_word_length + 2), dtype="float32")
@@ -248,12 +240,12 @@ class StrangeSyntacticParser:
         print(model.summary())
         return model
 
-    def build_Dozat_network(self, state_units=256, dropout=0.2,
+    def build_Dozat_network(self, state_size=256, dropout=0.2,
                             lstm_layers=1, lstm_size=128, lstm_dropout=0.2,
                             char_layer_params=None, tag_embeddings_size=64):
         inputs, embeddings = [], []
         if self.embedder is not None:
-            word_inputs = kl.Input(shape=(None, self.embedder.dim), dtype="float32")
+            word_inputs = kl.Input(shape=(None, self.embedder_.dim), dtype="float32")
             inputs.append(word_inputs)
             embeddings.append(word_inputs)
         if self.use_char_model:
@@ -275,11 +267,13 @@ class StrangeSyntacticParser:
             lstm_layer = kl.Bidirectional(kl.LSTM(lstm_size, dropout=lstm_dropout, return_sequences=True))
             lstm_input = lstm_layer(lstm_input)
         lstm_layer = kl.Bidirectional(kl.LSTM(lstm_size, dropout=lstm_dropout, return_sequences=True))
-        lstm_output = lstm_layer(embeddings)
+        lstm_output = lstm_layer(lstm_input)
+        if self.use_positional_encoding:
+            lstm_output = AddPositionalEncoding(max_length=256)(lstm_output)
         # selecting each word head
-        head_encodings = kl.Dropout(dropout)(kl.Dense(state_units, activation="relu")(lstm_output))
-        dep_encodings = kl.Dropout(dropout)(kl.Dense(state_units, activation="relu")(lstm_output))
-        head_similarities = BiaffineAttention(state_units, use_first_bias=True)([dep_encodings, head_encodings])
+        head_encodings = kl.Dropout(dropout)(kl.Dense(state_size, activation="relu")(lstm_output))
+        dep_encodings = kl.Dropout(dropout)(kl.Dense(state_size, activation="relu")(lstm_output))
+        head_similarities = BiaffineAttention(state_size, use_first_bias=True)([dep_encodings, head_encodings])
         head_probs = kl.Softmax(name="heads", axis=-1)(head_similarities)
         # selecting each word dependency type (with gold heads)
         dep_inputs = kl.Input(shape=(None,), dtype="int32")
@@ -287,9 +281,9 @@ class StrangeSyntacticParser:
         inputs.extend([dep_inputs, head_inputs])
         dep_embeddings = kl.Lambda(gather_indexes, arguments={"B": dep_inputs})(lstm_output)
         head_embeddings = kl.Lambda(gather_indexes, arguments={"B": head_inputs})(lstm_output)
-        dep_encodings = kl.Dropout(dropout)(kl.Dense(state_units, activation="relu")(dep_embeddings))
-        head_encodings = kl.Dropout(dropout)(kl.Dense(state_units, activation="relu")(head_embeddings))
-        dep_probs = BiaffineLayer(self.dep_vocabulary_.symbols_number_, state_units,
+        dep_encodings = kl.Dropout(dropout)(kl.Dense(state_size, activation="relu")(dep_embeddings))
+        head_encodings = kl.Dropout(dropout)(kl.Dense(state_size, activation="relu")(head_embeddings))
+        dep_probs = BiaffineLayer(self.dep_vocabulary_.symbols_number_, state_size,
                                   name="deps", use_first_bias=True, use_second_bias=True,
                                   use_label_bias=True, activation="softmax")([dep_encodings, head_encodings])
         outputs, head_model_output = [head_probs, dep_probs], [head_probs]
@@ -297,9 +291,9 @@ class StrangeSyntacticParser:
         loss, loss_weights = ["categorical_crossentropy"] * 2, [1.0, 1.0]
         metrics = {"heads": "accuracy", "deps": "accuracy"}
         if self.to_predict_children:
-            head_encodings = kl.Dropout(dropout)(kl.Dense(state_units, activation="relu")(lstm_output))
-            dep_encodings = kl.Dropout(dropout)(kl.Dense(state_units, activation="relu")(lstm_output))
-            similarities = BiaffineAttention(state_units, use_first_bias=True)([head_encodings, dep_encodings])
+            head_encodings = kl.Dropout(dropout)(kl.Dense(state_size, activation="relu")(lstm_output))
+            dep_encodings = kl.Dropout(dropout)(kl.Dense(state_size, activation="relu")(lstm_output))
+            similarities = BiaffineAttention(state_size, use_first_bias=True)([head_encodings, dep_encodings])
             child_probs = kl.Activation("sigmoid", name="children")(similarities)
             outputs.append(child_probs)
             child_model = kb.Function(inputs[:-2] + [kb.learning_phase()], [child_probs])
@@ -346,10 +340,6 @@ class StrangeSyntacticParser:
               head_model_file=None, dep_model_file=None, train_params=None):
         if train_params is None:
             train_params = self.train_params
-        # if self.to_predict_children:
-        #     heads = [reverse_heads(elem) for elem in heads]
-        #     if dev_sents is not None:
-        #         dev_heads = [reverse_heads(elem) for elem in dev_heads]
         sents, heads, deps = pad_data(sents, heads, deps)
         if self.use_char_model:
             sent_data = self._transform_data(sents, to_train=to_build)
@@ -393,7 +383,7 @@ class StrangeSyntacticParser:
         if self.to_predict_children:
             additional_classes_number.append(DataGenerator.POSITIONS_AS_CLASSES)
             additional_target_paddings.append(PAD)
-        gen_params = {"embedder": self.embedder, "batch_size": batch_size,
+        gen_params = {"embedder": self.embedder_, "batch_size": batch_size,
                       "classes_number": DataGenerator.POSITIONS_AS_CLASSES,
                       "additional_classes_number": additional_classes_number,
                       "additional_target_paddings": additional_target_paddings}
@@ -444,7 +434,7 @@ class StrangeSyntacticParser:
                          nepochs=5, batch_size=16, patience=1):
         self.head_model_ = self.build_head_network(**self.head_model_params)
         # self._initialize_position_embeddings()
-        head_gen_params = {"embedder": self.embedder, "batch_size": batch_size,
+        head_gen_params = {"embedder": self.embedder_, "batch_size": batch_size,
                            "classes_number": DataGenerator.POSITIONS_AS_CLASSES}
         additional_data = [tags] if self.use_tags else None
         train_gen = DataGenerator(sents, heads, additional_data=additional_data, **head_gen_params)
@@ -468,7 +458,7 @@ class StrangeSyntacticParser:
         self.dep_model_ = self.build_dep_network(**self.dep_model_params)
         dep_indexes, head_indexes, dep_codes =\
             make_indexes_for_syntax(heads, deps, dep_vocab=self.dep_vocabulary_, to_pad=False)
-        dep_gen_params = {"embedder": self.embedder, "classes_number": self.dep_vocabulary_.symbols_number_,
+        dep_gen_params = {"embedder": self.embedder_, "classes_number": self.dep_vocabulary_.symbols_number_,
                           "batch_size": batch_size, "target_padding": PAD,
                           "additional_padding": [DataGenerator.POSITION_AS_PADDING] * 2}
         additional_data = [dep_indexes, head_indexes]
@@ -519,7 +509,7 @@ class StrangeSyntacticParser:
         data = [sents, sent_data, tags]
         additional_data = [data[i] for i in self.active_input_indexes[1:]]
         test_gen = DataGenerator(data[self.first_input_index], additional_data=additional_data,
-                                 embedder=self.embedder, yield_targets=False, yield_indexes=True,
+                                 embedder=self.embedder_, yield_targets=False, yield_indexes=True,
                                  shuffle=False, nepochs=1)
         for batch_index, (batch, indexes) in enumerate(test_gen):
             if self.use_joint_model:
@@ -548,7 +538,7 @@ class StrangeSyntacticParser:
         data = [sents, sent_data, tags]
         additional_data = [data[i] for i in self.active_input_indexes[1:]] + [dep_indexes, head_indexes]
         additional_padding = [0] * (len(additional_data)-2) + [DataGenerator.POSITION_AS_PADDING] * 2
-        generator_params = {"embedder": self.embedder, "additional_data": additional_data,
+        generator_params = {"embedder": self.embedder_, "additional_data": additional_data,
                             "additional_padding": additional_padding}
         test_gen = DataGenerator(data[self.first_input_index],
                                  yield_indexes=True, yield_targets=False,
@@ -581,14 +571,5 @@ def evaluate_heads(corr_heads, pred_heads):
         corr_sents += 1 - int(has_nonequal)
         total += len(corr_sent)
     return corr, total, corr / total, corr_sents, len(corr_heads), corr_sents / len(corr_heads)
-
-
-if __name__ == "__main__":
-    parser = load_syntactic_parser("syntax/config/config_load_basic.json")
-    test_infile = "/home/alexeysorokin/data/Data/UD2.3/UD_Russian-SynTagRus/ru_syntagrus-ud-test.conllu"
-    sents, heads, deps = read_syntax_infile(test_infile, to_process_word=False)
-    pred_heads, pred_deps = parser.predict(sents)
-    print(evaluate_heads(heads, pred_heads))
-
 
 
