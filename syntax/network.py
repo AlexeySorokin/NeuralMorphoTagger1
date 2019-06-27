@@ -23,8 +23,6 @@ from common.cells import MultilabelSigmoidAccuracy, MultilabelSigmoidLoss
 from syntax.common_syntax import pad_data, load_embeddings, make_indexes_for_syntax, reverse_heads
 
 from dependency_decoding import chu_liu_edmonds
-from keras_transformer.transformer import TransformerBlock
-from keras_transformer.position import AddPositionalEncoding
 
 from deeppavlov import build_model, configs
 from deeppavlov.core.common.params import from_params
@@ -245,18 +243,16 @@ class StrangeSyntacticParser:
         print(model.summary())
         return model
 
-    def build_Dozat_network(self, use_transformer=False, transformer_layers=2,
-                            state_size=256, dropout=0.2, tag_dropout=0.0,
+    def build_Dozat_network(self, state_size=256, dropout=0.2, tag_dropout=0.0,
                             lstm_layers=1, lstm_size=128, lstm_dropout=0.2,
                             char_layer_params=None, tag_embeddings_size=64):
         inputs, embeddings = [], []
-        length = self.MAX_SENTENCE_LENGTH if use_transformer else None
         if self.embedder is not None:
-            word_inputs = kl.Input(shape=(length, self.embedder_.dim), dtype="float32")
+            word_inputs = kl.Input(shape=(None, self.embedder_.dim), dtype="float32")
             inputs.append(word_inputs)
             embeddings.append(word_inputs)
         if self.use_char_model:
-            char_inputs = kl.Input(shape=(length, self.max_word_length + 2), dtype="float32")
+            char_inputs = kl.Input(shape=(None, self.max_word_length + 2), dtype="float32")
             inputs.append(char_inputs)
             char_layer_params = char_layer_params or dict()
             word_embeddings = build_word_cnn(char_inputs, from_one_hot=False,
@@ -264,31 +260,19 @@ class StrangeSyntacticParser:
                                              **char_layer_params)
             embeddings.append(word_embeddings)
         if self.use_tags:
-            tag_inputs = kl.Input(shape=(length, self.tag_vocabulary_.symbol_vector_size_), dtype="float32")
+            tag_inputs = kl.Input(shape=(None, self.tag_vocabulary_.symbol_vector_size_), dtype="float32")
             tag_embeddings = kl.Dense(tag_embeddings_size, activation="relu")(tag_inputs)
             if tag_dropout > 0.0:
                 tag_embeddings = kl.Dropout(tag_dropout)(tag_embeddings)
             inputs.append(tag_inputs)
             embeddings.append(tag_embeddings)
         embeddings = kl.Concatenate()(embeddings) if len(embeddings) > 1 else embeddings[0]
-        if use_transformer:
-            transformer_input = kl.Dense(2*lstm_size)(embeddings)
-            transformer_input = AddPositionalEncoding(max_length=256)(transformer_input)
-            for i in range(transformer_layers):
-                transformer_input = TransformerBlock(name="trans_{}".format(i+1), num_heads=8,
-                                                     residual_dropout=dropout,
-                                                     attention_dropout=dropout,
-                                                     activation="tanh")(transformer_input)
-            lstm_output = transformer_input
-        else:
-            lstm_input = embeddings
-            for i in range(lstm_layers-1):
-                lstm_layer = kl.Bidirectional(kl.LSTM(lstm_size, dropout=lstm_dropout, return_sequences=True))
-                lstm_input = lstm_layer(lstm_input)
+        lstm_input = embeddings
+        for i in range(lstm_layers-1):
             lstm_layer = kl.Bidirectional(kl.LSTM(lstm_size, dropout=lstm_dropout, return_sequences=True))
-            lstm_output = lstm_layer(lstm_input)
-            if self.use_positional_encoding:
-                lstm_output = AddPositionalEncoding(max_length=256)(lstm_output)
+            lstm_input = lstm_layer(lstm_input)
+        lstm_layer = kl.Bidirectional(kl.LSTM(lstm_size, dropout=lstm_dropout, return_sequences=True))
+        lstm_output = lstm_layer(lstm_input)
         # selecting each word head
         head_encodings = kl.Dropout(dropout)(kl.Dense(state_size, activation="relu")(lstm_output))
         dep_encodings = kl.Dropout(dropout)(kl.Dense(state_size, activation="relu")(lstm_output))
@@ -418,11 +402,9 @@ class StrangeSyntacticParser:
         additional_data = [data[i] for i in additional_input_indexes]
         gen_params["additional_padding"] = [paddings[i] for i in additional_input_indexes]
         additional_targets = [dep_codes, heads] if self.to_predict_children else [dep_codes]
-        max_length = self.MAX_SENTENCE_LENGTH if self.model_params.get("use_transformer") else None
         train_gen = DataGenerator(data[self.first_input_index], targets=heads,
                                   additional_data=additional_data,
                                   additional_targets=additional_targets,
-                                  max_length=max_length,
                                   shuffle=True, **gen_params)
         if dev_sent_data is not None:
             dev_dep_indexes, dev_head_indexes, dev_dep_codes = \
@@ -435,7 +417,6 @@ class StrangeSyntacticParser:
             dev_gen = DataGenerator(dev_data[self.first_input_index], targets=dev_heads,
                                     additional_data=additional_dev_data,
                                     additional_targets=additional_targets,
-                                    max_length=max_length,
                                     shuffle=False, **gen_params)
             validation_steps = dev_gen.steps_per_epoch
         else:
@@ -529,13 +510,12 @@ class StrangeSyntacticParser:
         return tuple(answer)
 
     def predict_heads(self, sents, sent_data, tags=None):
-        max_length = self.MAX_SENTENCE_LENGTH if self.model_params.get("use_transformer") else None
         probs, heads = [None] * len(sents), [None] * len(sents)
         data = [sents, sent_data, tags]
         additional_data = [data[i] for i in self.active_input_indexes[1:]]
         test_gen = DataGenerator(data[self.first_input_index], additional_data=additional_data,
                                  embedder=self.embedder_, yield_targets=False, yield_indexes=True,
-                                 max_length=max_length, shuffle=False, nepochs=1)
+                                 shuffle=False, nepochs=1)
         for batch_index, (batch, indexes) in enumerate(test_gen):
             if self.use_joint_model:
                 predictions = self.head_model_(batch + [0])
@@ -559,7 +539,6 @@ class StrangeSyntacticParser:
         return probs, chl_pred_heads
 
     def predict_deps(self, sents, sent_data, heads, tags=None):
-        max_length = self.MAX_SENTENCE_LENGTH if self.model_params.get("use_transformer") else None
         dep_indexes, head_indexes = make_indexes_for_syntax(heads)
         data = [sents, sent_data, tags]
         additional_data = [data[i] for i in self.active_input_indexes[1:]] + [dep_indexes, head_indexes]
@@ -568,8 +547,7 @@ class StrangeSyntacticParser:
                             "additional_padding": additional_padding}
         test_gen = DataGenerator(data[self.first_input_index],
                                  yield_indexes=True, yield_targets=False,
-                                 max_length=max_length, shuffle=False,
-                                 nepochs=1, **generator_params)
+                                 shuffle=False, nepochs=1, **generator_params)
         answer = [None] * len(sents)
         for batch, indexes in test_gen:
             if self.use_joint_model:
