@@ -1,3 +1,7 @@
+import sys, os
+# sys.path.append(os.getcwd())
+# for elem in sys.path:
+#     print(elem)
 from common.common import BEGIN, END, PAD
 
 from deeppavlov import build_model, configs

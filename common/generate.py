@@ -222,7 +222,8 @@ class DataGenerator:
     POSITIONS_AS_CLASSES = 0
     POSITION_AS_PADDING = -1
 
-    def __init__(self, data, targets=None, embedder=None, padding=0,
+    def __init__(self, data, targets=None, embedder=None,
+                 max_length=None, padding=0,
                  additional_data=None, pad_additional_data=True,
                  additional_padding=None, additional_targets=None,
                  target_padding=0, additional_target_paddings=None,
@@ -232,6 +233,7 @@ class DataGenerator:
                  additional_classes_number=None,
                  batch_size=16, shuffle=False, nepochs=None):
         self.data = data
+        self.max_length = max_length
         self.targets = targets
         self.embedder = embedder
         self.padding = padding
@@ -283,7 +285,10 @@ class DataGenerator:
             if self.embedder is not None and use_embedder:
                 curr_data = self.embedder(curr_data)
             # dtype = first_item.dtype if len(first_item) > 0 else int
-            L = max(len(elem) for elem in curr_data)
+            if self.max_length is None:
+                L = max(len(elem) for elem in curr_data)
+            else:
+                L = self.max_length
             first_item = np.array(curr_data[0])
             shape = (len(indexes), L) + np.shape(curr_data[0])[1:]
             answer = np.ones(shape=shape, dtype=first_item.dtype)

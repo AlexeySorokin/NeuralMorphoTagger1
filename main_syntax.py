@@ -1,4 +1,5 @@
 import sys
+import os
 import getopt
 import ujson as json
 
@@ -6,19 +7,8 @@ import tensorflow as tf
 import keras.backend.tensorflow_backend as kbt
 
 from syntax.network import StrangeSyntacticParser, evaluate_heads, load_parser
-from syntax.common import load_elmo, load_glove
+from syntax.common_syntax import load_elmo, load_glove
 from common.read import read_syntax_infile, read_UD_file, read_tags_infile
-
-USE_TAGS = True
-MAX_SENTS, MAX_DEV_SENTS, MAX_TEST_SENTS = -1, -1, -1
-LOAD_FILE = None # "syntax/models/model.json"
-TO_TRAIN, TO_TEST = True, True
-SAVE_FILE = "syntax/models/model-glove-child-2.json"
-MODEL_FILE = "syntax/models/model-glove-child-2.hdf5"
-EMBEDDER_MODE = "glove"
-OUTFILE = "syntax/dump/analysis-model-glove-child-2.out"
-TO_PREDICT_CHILDREN = True
-
 
 DEFAULT_DICT_PARAMS = ["model_params", "embedder_params"]
 DEFAULT_NONE_PARAMS = ["load_file", "save_file", "model_file", "train_file", "dev_file", "test_file", "outfile"]
@@ -62,22 +52,24 @@ def dump_output(outfile, sents, tags, heads, deps, pred_heads, pred_deps, pred_p
             fout.write("\n")
 
 
-SHORT_OPTS, LONG_OPTS = 'tT', ["no-train", "no-test"]
+SHORT_OPTS, LONG_OPTS = 'ltT', ["no-load", "no-train", "no-test"]
 
 if __name__ == "__main__":
     tf_config = tf.ConfigProto()
     tf_config.gpu_options.per_process_gpu_memory_fraction = 0.3
     kbt.set_session(tf.Session(config=tf_config))
-    to_train, to_test = True, True
+    to_load, to_train, to_test = True, True, True
     opts, args = getopt.getopt(sys.argv[1:], SHORT_OPTS)
     for opt, val in opts:
+        if opt in ["-l", "--no-load"]:
+            to_load = False
         if opt in ["-t", "--no-train"]:
             to_train = False
         if opt in ["-T", "--no-test"]:
             to_test = False
     config = read_parser_config(args[0])
     # train_params = {"nepochs": 20, "patience": 3}
-    if config["load_file"] is not None:
+    if to_load and config["load_file"] is not None and os.path.exists(config["load_file"]):
         to_build = False
         parser = load_parser(config["load_file"])
     else:
@@ -104,7 +96,7 @@ if __name__ == "__main__":
             tags = None
         # dev_file = "/home/alexeysorokin/data/Data/UD2.3/UD_Russian-SynTagRus/ru_syntagrus-ud-dev.conllu"
         if dev_file is not None:
-            dev_sents, dev_heads, dev_deps = read_syntax_infile(dev_file, max_sents=MAX_DEV_SENTS,
+            dev_sents, dev_heads, dev_deps = read_syntax_infile(dev_file, max_sents=config["max_dev_sents"],
                                                                 to_lower=True, to_shuffle=False,
                                                                 to_process_word=False)
             if config["use_tags"]:
