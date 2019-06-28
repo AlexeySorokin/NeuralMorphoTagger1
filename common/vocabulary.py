@@ -26,6 +26,7 @@ def vocabulary_from_json(info, use_features=False):
         vocab._make_features(**args)
     return vocab
 
+
 class Vocabulary:
 
     def __init__(self, character=False, min_count=1, special_tokens=None):

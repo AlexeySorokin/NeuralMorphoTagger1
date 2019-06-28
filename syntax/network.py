@@ -21,6 +21,7 @@ from common.common import gather_indexes
 from common.cells import BiaffineAttention, BiaffineLayer, build_word_cnn
 from common.cells import MultilabelSigmoidAccuracy, MultilabelSigmoidLoss
 from syntax.common_syntax import pad_data, load_embeddings, make_indexes_for_syntax, reverse_heads
+from neural_tagging.cells import TemporalDropout
 
 from dependency_decoding import chu_liu_edmonds
 
@@ -263,7 +264,8 @@ class StrangeSyntacticParser:
             tag_inputs = kl.Input(shape=(None, self.tag_vocabulary_.symbol_vector_size_), dtype="float32")
             tag_embeddings = kl.Dense(tag_embeddings_size, activation="relu")(tag_inputs)
             if tag_dropout > 0.0:
-                tag_embeddings = kl.Dropout(tag_dropout)(tag_embeddings)
+                # tag_embeddings = kl.Dropout(tag_dropout)(tag_embeddings)
+                tag_embeddings = TemporalDropout(tag_embeddings, tag_dropout)
             inputs.append(tag_inputs)
             embeddings.append(tag_embeddings)
         embeddings = kl.Concatenate()(embeddings) if len(embeddings) > 1 else embeddings[0]
