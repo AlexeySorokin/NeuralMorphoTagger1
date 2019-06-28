@@ -95,7 +95,7 @@ class StrangeSyntacticParser:
     MAX_SENTENCE_LENGTH = None
 
     def __init__(self, embedder=None, embedder_params=None,
-                 use_joint_model=True, use_tags=True,
+                 use_joint_model=True, use_tags=True, predict_tags=False,
                  use_char_model=True, max_word_length=MAX_WORD_LENGTH,
                  to_predict_children=True, use_positional_encoding=False,
                  head_model_params=None, dep_model_params=None,
@@ -106,6 +106,7 @@ class StrangeSyntacticParser:
         self.embedder = embedder
         self.embedder_params = embedder_params or dict()
         self.use_tags = use_tags
+        self.predict_tags = predict_tags
         self.use_char_model = use_char_model
         self.max_word_length = max_word_length
         self.to_predict_children = to_predict_children
@@ -126,6 +127,11 @@ class StrangeSyntacticParser:
             self.embedder_ = load_embeddings(self.embedder, **self.embedder_params)
         else:
             self.embedder_ = None
+        if self.use_tags and self.predict_tags:
+            self.predict_tags = False
+            UserWarning("'use_tags' and 'predict_tags' cannot be True simultaneously. "
+                        "'predict_tags' is set to False.")
+
 
     def to_json(self, outfile, model_file=None, head_model_file=None, dep_model_file=None):
         info = dict()
@@ -246,7 +252,8 @@ class StrangeSyntacticParser:
 
     def build_Dozat_network(self, state_size=256, dropout=0.2, tag_dropout=0.0,
                             lstm_layers=1, lstm_size=128, lstm_dropout=0.2,
-                            char_layer_params=None, tag_embeddings_size=64):
+                            char_layer_params=None, tag_state_size=128,
+                            tag_embeddings_size=64):
         inputs, embeddings = [], []
         if self.embedder is not None:
             word_inputs = kl.Input(shape=(None, self.embedder_.dim), dtype="float32")
@@ -269,6 +276,14 @@ class StrangeSyntacticParser:
             inputs.append(tag_inputs)
             embeddings.append(tag_embeddings)
         embeddings = kl.Concatenate()(embeddings) if len(embeddings) > 1 else embeddings[0]
+        if self.predict_tags:
+            tag_states = kl.Dense(tag_state_size, activation="relu")(embeddings)
+            if tag_embeddings_size > 0:
+                tag_embeddings = kl.Dropout(tag_dropout)(
+                    kl.Dense(tag_embeddings_size, activation="relu")(tag_states))
+                embeddings = kl.Concatenate()([embeddings, tag_embeddings])
+            tag_probs = kl.Dense(self.tag_vocabulary_.symbols_number_,
+                                 activation="softmax", name="tag_probs")(tag_states)
         lstm_input = embeddings
         for i in range(lstm_layers-1):
             lstm_layer = kl.Bidirectional(kl.LSTM(lstm_size, dropout=lstm_dropout, return_sequences=True))
@@ -306,6 +321,11 @@ class StrangeSyntacticParser:
             loss_weights.append(1.0)
             metrics["children"] = MultilabelSigmoidAccuracy(axis=-2)
             head_model_output.append(child_probs)
+        if self.predict_tags:
+            outputs.append(tag_probs)
+            loss.append("categorical_crossentropy")
+            loss_weights.append(0.5)
+            metrics["tag_probs"] = "accuracy"
         head_model = kb.Function(inputs[:-2] + [kb.learning_phase()], head_model_output)
         dep_model = kb.Function(inputs + [kb.learning_phase()], [dep_probs])
         model = Model(inputs, outputs)
@@ -336,8 +356,12 @@ class StrangeSyntacticParser:
     def _transform_tags(self, sents, to_train=False):
         sents = [['BEGIN'] + sent + ['END'] for sent in sents]
         if to_train:
-            self.tag_vocabulary_ = FeatureVocabulary(min_count=3).train(sents)
-        answer = [[self.tag_vocabulary_.to_vector(x, return_vector=True) for x in sent] for sent in sents]
+            Vocab = FeatureVocabulary if not self.predict_tags else Vocabulary
+            self.tag_vocabulary_ = Vocab(min_count=3).train(sents)
+        if self.predict_tags:
+            answer = [[self.tag_vocabulary_.toidx(x) for x in sent] for sent in sents]
+        else:
+            answer = [[self.tag_vocabulary_.to_vector(x, return_vector=True) for x in sent] for sent in sents]
         return answer
 
     def train(self, sents, heads, deps, dev_sents=None, dev_heads=None, dev_deps=None,
@@ -357,7 +381,7 @@ class StrangeSyntacticParser:
         if dev_sents is not None:
             dev_sents, dev_heads, dev_deps = pad_data(dev_sents, dev_heads, dev_deps)
             dev_sent_data = self._transform_data(dev_sents) if self.use_char_model else dev_sents
-            dev_tag_data = self._transform_tags(dev_tags) if self.use_tags else None
+            dev_tag_data = self._transform_tags(dev_tags) if dev_tags is not None else None
         else:
             dev_sent_data, dev_heads, dev_deps, dev_tag_data = None, None, None, None
         # self.dep_vocabulary_ = Vocabulary(min_count=3)
@@ -404,6 +428,10 @@ class StrangeSyntacticParser:
         additional_data = [data[i] for i in additional_input_indexes]
         gen_params["additional_padding"] = [paddings[i] for i in additional_input_indexes]
         additional_targets = [dep_codes, heads] if self.to_predict_children else [dep_codes]
+        if self.predict_tags:
+            additional_targets.append(tags)
+            gen_params["additional_classes_number"].append(self.tag_vocabulary_.symbols_number_)
+            gen_params["additional_target_paddings"].append(PAD)
         train_gen = DataGenerator(data[self.first_input_index], targets=heads,
                                   additional_data=additional_data,
                                   additional_targets=additional_targets,
@@ -416,6 +444,8 @@ class StrangeSyntacticParser:
             additional_targets = [dev_dep_codes]
             if self.to_predict_children:
                 additional_targets.append(dev_heads)
+            if self.predict_tags:
+                additional_targets.append(dev_tags)
             dev_gen = DataGenerator(dev_data[self.first_input_index], targets=dev_heads,
                                     additional_data=additional_dev_data,
                                     additional_targets=additional_targets,

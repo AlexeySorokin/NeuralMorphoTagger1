@@ -78,13 +78,7 @@ if __name__ == "__main__":
         #                  load_glove if config["embedder_mode"] == "glove" else
         #                  None)
         # embedder = embedder_func(config["embedder_params"]) if embedder_func is not None else None
-        parser = StrangeSyntacticParser(use_tags=config["use_tags"],
-                                        # train_params=config["train_params"],
-                                        **config["model_params"],
-                                        # model_params={"lstm_layers": 2, "lstm_size": 128},
-                                        # char_layer_params={"char_window_size": [1, 2, 3, 4, 5, 6, 7],
-                                        #                    "char_embeddings_size": 32, "char_filter_multiple": 25}
-                                       )
+        parser = StrangeSyntacticParser(**config["model_params"])
     if to_train and config["train_file"] is not None:
         train_file, dev_file = config["train_file"], config["dev_file"]
         # train_file = "/home/alexeysorokin/data/Data/UD2.3/UD_Russian-SynTagRus/ru_syntagrus-ud-train.conllu"
