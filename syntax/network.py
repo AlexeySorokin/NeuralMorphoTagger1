@@ -20,14 +20,11 @@ from common.common import BEGIN, END, PAD
 from common.common import gather_indexes
 from common.cells import BiaffineAttention, BiaffineLayer, build_word_cnn
 from common.cells import MultilabelSigmoidAccuracy, MultilabelSigmoidLoss
-from syntax.common_syntax import pad_data, load_embeddings, make_indexes_for_syntax, reverse_heads
+from syntax.common_syntax import pad_data, load_embeddings, make_indexes_for_syntax
+from common.models import EmbeddingsLearner
 from neural_tagging.cells import TemporalDropout
 
 from dependency_decoding import chu_liu_edmonds
-
-from deeppavlov import build_model, configs
-from deeppavlov.core.common.params import from_params
-from deeppavlov.core.commands.utils import parse_config
 
 
 class PositionEmbedding(Layer):
@@ -95,6 +92,7 @@ class StrangeSyntacticParser:
     MAX_SENTENCE_LENGTH = None
 
     def __init__(self, embedder=None, embedder_params=None,
+                 mimick_embedder=False, embeddings_learner_params=None,
                  use_joint_model=True, use_tags=True, predict_tags=False,
                  use_char_model=True, max_word_length=MAX_WORD_LENGTH,
                  to_predict_children=True, use_positional_encoding=False,
@@ -105,6 +103,8 @@ class StrangeSyntacticParser:
         self.use_joint_model = use_joint_model
         self.embedder = embedder
         self.embedder_params = embedder_params or dict()
+        self.mimick_embedder = mimick_embedder
+        self.embeddings_learner_params = embeddings_learner_params or dict()
         self.use_tags = use_tags
         self.predict_tags = predict_tags
         self.use_char_model = use_char_model
@@ -131,7 +131,6 @@ class StrangeSyntacticParser:
             self.predict_tags = False
             UserWarning("'use_tags' and 'predict_tags' cannot be True simultaneously. "
                         "'predict_tags' is set to False.")
-
 
     def to_json(self, outfile, model_file=None, head_model_file=None, dep_model_file=None):
         info = dict()
@@ -168,7 +167,7 @@ class StrangeSyntacticParser:
 
     @property
     def active_input_indexes(self):
-        inputs = [self.embedder is not None, self.use_char_model, self.use_tags]
+        inputs = [self.embedder is not None and not self.mimick_embedder, self.use_char_model, self.use_tags]
         answer = [i for i, x in enumerate(inputs) if x]
         return answer
 
@@ -255,18 +254,22 @@ class StrangeSyntacticParser:
                             char_layer_params=None, tag_state_size=128,
                             tag_embeddings_size=64):
         inputs, embeddings = [], []
-        if self.embedder is not None:
+        if self.embedder is not None and not self.mimick_embedder:
             word_inputs = kl.Input(shape=(None, self.embedder_.dim), dtype="float32")
             inputs.append(word_inputs)
             embeddings.append(word_inputs)
-        if self.use_char_model:
+        if self.use_char_model or self.mimick_embedder:
             char_inputs = kl.Input(shape=(None, self.max_word_length + 2), dtype="float32")
             inputs.append(char_inputs)
+        if self.use_char_model:
             char_layer_params = char_layer_params or dict()
             word_embeddings = build_word_cnn(char_inputs, from_one_hot=False,
                                              symbols_number=self.symbol_vocabulary_.symbols_number_,
                                              **char_layer_params)
             embeddings.append(word_embeddings)
+        if self.mimick_embedder:
+            mimicked_embeddings = kl.TimeDistributed(self.pseudo_embedder_.model)(char_inputs)
+            embeddings.append(mimicked_embeddings)
         if self.use_tags:
             tag_inputs = kl.Input(shape=(None, self.tag_vocabulary_.symbol_vector_size_), dtype="float32")
             tag_embeddings = kl.Dense(tag_embeddings_size, activation="relu")(tag_inputs)
@@ -387,6 +390,11 @@ class StrangeSyntacticParser:
         # self.dep_vocabulary_ = Vocabulary(min_count=3)
         if to_build:
             self.dep_vocabulary_= Vocabulary(min_count=3).train(deps)
+        if self.mimick_embedder:
+            self.pseudo_embedder_ = EmbeddingsLearner(vocabulary=self.symbol_vocabulary_,
+                                                      **self.embeddings_learner_params)
+            self.pseudo_embedder_.train(self.embedder_)
+            self.embedder = None
         if self.use_joint_model:
             if save_file is not None:
                 self.to_json(save_file, model_file, head_model_file, dep_model_file)
@@ -414,7 +422,8 @@ class StrangeSyntacticParser:
         if self.to_predict_children:
             additional_classes_number.append(DataGenerator.POSITIONS_AS_CLASSES)
             additional_target_paddings.append(PAD)
-        gen_params = {"embedder": self.embedder_, "batch_size": batch_size,
+        gen_params = {"embedder": self.embedder_ if not self.mimick_embedder else None,
+                      "batch_size": batch_size,
                       "classes_number": DataGenerator.POSITIONS_AS_CLASSES,
                       "additional_classes_number": additional_classes_number,
                       "additional_target_paddings": additional_target_paddings}

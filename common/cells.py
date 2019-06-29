@@ -51,9 +51,11 @@ def build_word_cnn(inputs, symbols_number=None, char_embeddings_size=16,
     # inputs = kl.Lambda(kb.one_hot, arguments={"num_classes": self.symbols_number_},
     #                    output_shape=lambda x: tuple(x) + (self.symbols_number_,))(inputs)
     if from_one_hot:
+        dim = int(kb.ndim(inputs))
         inputs = kl.Lambda(kb.cast, arguments={"dtype": "float32"})(inputs)
         char_embeddings = kl.Dense(char_embeddings_size, use_bias=False)(inputs)
     else:
+        dim = int(kb.ndim(inputs)) + 1
         char_embeddings = kl.Embedding(symbols_number, char_embeddings_size)(inputs)
     conv_outputs = []
     char_output_dim_ = 0
@@ -65,15 +67,14 @@ def build_word_cnn(inputs, symbols_number=None, char_embeddings_size=16,
         curr_output = char_embeddings
         curr_filters_number = (min(char_filter_multiple * window_size, 200)
                                if filters_number is None else filters_number)
+        ConvLayer = kl.Conv1D if dim == 3 else kl.Conv2D
+        conv_params = {"padding": "same", "activation": "relu", "data_format": "channels_last"}
+        conv_window_size = window_size if dim == 3 else (1, window_size)
         for _ in range(char_conv_layers - 1):
-            curr_output = kl.Conv2D(curr_filters_number, (1, window_size),
-                                    padding="same", activation="relu",
-                                    data_format="channels_last")(curr_output)
+            curr_output = ConvLayer(curr_filters_number, conv_window_size, **conv_params)(curr_output)
             if dropout > 0.0:
                 curr_output = kl.Dropout(dropout)(curr_output)
-        curr_output = kl.Conv2D(curr_filters_number, (1, window_size),
-                                padding="same", activation="relu",
-                                data_format="channels_last")(curr_output)
+        curr_output = ConvLayer(curr_filters_number, conv_window_size, **conv_params)(curr_output)
         conv_outputs.append(curr_output)
         char_output_dim_ += curr_filters_number
     if len(conv_outputs) > 1:
