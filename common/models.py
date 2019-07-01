@@ -85,8 +85,9 @@ class EmbeddingsLearner:
                                      highway_layers=self.highway_layers, dropout=self.dropout,
                                      from_one_hot=False)
         for _ in range(self.dense_layers):
-            outputs = kl.Dense(self.dense_units, activation="relu")(outputs)
+            outputs = kl.Dense(self.dense_units, activation="tanh")(outputs)
         output_embeddings = kl.Dense(self.dim, name="output_embeddings")(outputs)
         model = Model(inputs, output_embeddings)
         model.compile(optimizer=Adam(clipnorm=5.0), loss="mean_squared_error")
+        print(model.summary())
         return model

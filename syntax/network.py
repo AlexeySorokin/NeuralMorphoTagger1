@@ -1,3 +1,4 @@
+import sys
 import os
 import ujson as json
 import numpy as np
@@ -268,7 +269,9 @@ class StrangeSyntacticParser:
                                              **char_layer_params)
             embeddings.append(word_embeddings)
         if self.mimick_embedder:
-            mimicked_embeddings = kl.TimeDistributed(self.pseudo_embedder_.model)(char_inputs)
+            mimicked_embeddings = kl.TimeDistributed(self.pseudo_embedder_.model, 
+                                                     name="pseudo_embedder",
+                                                     trainable=False)(char_inputs)
             embeddings.append(mimicked_embeddings)
         if self.use_tags:
             tag_inputs = kl.Input(shape=(None, self.tag_vocabulary_.symbol_vector_size_), dtype="float32")
@@ -333,7 +336,6 @@ class StrangeSyntacticParser:
         dep_model = kb.Function(inputs + [kb.learning_phase()], [dep_probs])
         model = Model(inputs, outputs)
         model.compile(optimizer=kopt.Adam(clipnorm=5.0), loss=loss, loss_weights=loss_weights, metrics=metrics)
-        print(model.summary())
         return model, head_model, dep_model
 
     def _recode(self, sent):
