@@ -8,6 +8,7 @@ from deeppavlov import build_model, configs
 from deeppavlov.core.common.params import from_params
 from deeppavlov.core.commands.utils import parse_config
 from deeppavlov.models.embedders.glove_embedder import GloVeEmbedder
+from deeppavlov.models.embedders.fasttext_embedder import FasttextEmbedder
 
 
 def load_embeddings(embedder_mode, **kwargs):
@@ -15,6 +16,8 @@ def load_embeddings(embedder_mode, **kwargs):
         embedder_func = load_elmo
     elif embedder_mode == "glove":
         embedder_func = load_glove
+    elif embedder_mode == "fasttext":
+        embedder_func = load_fasttext
     elif embedder_mode is not None:
         raise ValueError("Wrong embedder mode: {}".format(embedder_mode))
     else:
@@ -30,6 +33,10 @@ def load_elmo(elmo_output_names=("lstm_outputs1",)):
 
 def load_glove(load_path):
     embedder = GloVeEmbedder(load_path=load_path, pad_zero=True)
+    return embedder
+
+def load_fasttext(load_path):
+    embedder = FasttextEmbedder(load_path=load_path, pad_zero=True)
     return embedder
 
 def pad_data(words, heads=None, deps=None, to_pad_heads=True):

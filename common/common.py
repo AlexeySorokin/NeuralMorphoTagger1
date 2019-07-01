@@ -10,7 +10,7 @@ import tensorflow as tf
 
 if kb.backend() == "tensorflow":
     from common.common_tensorflow import generate_future_mask
-
+    import keras.backend.tensorflow_backend as kbt
 
 EPS = 1e-15
 
@@ -18,13 +18,12 @@ AUXILIARY = ['PAD', 'BEGIN', 'END', 'UNKNOWN']
 AUXILIARY_CODES = PAD, BEGIN, END, UNKNOWN = 0, 1, 2, 3
 
 
-# def to_one_hot(x, k):
-#     """
-#     Takes an array of integers and transforms it
-#     to an array of one-hot encoded vectors
-#     """
-#     unit = np.eye(k, dtype=int)
-#     return unit[x]
+def set_gpu_usage(frac=0.4):
+    tf_config = tf.ConfigProto()
+    tf_config.gpu_options.per_process_gpu_memory_fraction = frac
+    kbt.set_session(tf.Session(config=tf_config))
+    return
+
 
 def to_one_hot(indices, num_classes):
     """
