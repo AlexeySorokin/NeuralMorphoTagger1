@@ -285,8 +285,9 @@ class StrangeSyntacticParser:
         if self.predict_tags:
             tag_states = kl.Dense(tag_state_size, activation="relu")(embeddings)
             if tag_embeddings_size > 0:
-                tag_embeddings = TemporalDropout(tag_dropout)(
-                    kl.Dense(tag_embeddings_size, activation="relu")(tag_states))
+                tag_embeddings = kl.Dense(tag_embeddings_size, activation="relu")(tag_states)
+                if tag_dropout > 0.0:
+                    tag_embeddings = TemporalDropout(tag_embeddings, tag_dropout)
                 embeddings = kl.Concatenate()([embeddings, tag_embeddings])
             tag_probs = kl.Dense(self.tag_vocabulary_.symbols_number_,
                                  activation="softmax", name="tag_probs")(tag_states)
