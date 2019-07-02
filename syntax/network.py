@@ -124,7 +124,7 @@ class StrangeSyntacticParser:
         self.dep_model_params["char_layer_params"] = self.char_layer_params
         if self.embedder is None and not self.use_char_model and not self.use_tags:
             raise ValueError("")
-        if self.embedder in ["elmo", "glove", "fasttext"]:
+        if self.embedder in ["elmo", "glove", "fasttext", "external_elmo"]:
             self.embedder_ = load_embeddings(self.embedder, **self.embedder_params)
         else:
             self.embedder_ = None
@@ -285,7 +285,7 @@ class StrangeSyntacticParser:
         if self.predict_tags:
             tag_states = kl.Dense(tag_state_size, activation="relu")(embeddings)
             if tag_embeddings_size > 0:
-                tag_embeddings = kl.Dropout(tag_dropout)(
+                tag_embeddings = TemporalDropout(tag_dropout)(
                     kl.Dense(tag_embeddings_size, activation="relu")(tag_states))
                 embeddings = kl.Concatenate()([embeddings, tag_embeddings])
             tag_probs = kl.Dense(self.tag_vocabulary_.symbols_number_,

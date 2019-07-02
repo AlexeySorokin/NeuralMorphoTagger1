@@ -4,6 +4,7 @@ import sys
 
 import numpy as np
 from keras.callbacks import Callback, EarlyStopping
+from elmoformanylangs import Embedder as ExternalElmoEmbedder
 
 from common.common import PAD, to_one_hot
 
@@ -283,7 +284,10 @@ class DataGenerator:
         if first_item.ndim > 0 and use_length:
             curr_data = [data[index] for index in indexes]
             if self.embedder is not None and use_embedder:
-                curr_data = self.embedder(curr_data)
+                if isinstance(self.embedder, ExternalElmoEmbedder):
+                    curr_data = self.embedder.sents2elmo(curr_data)
+                else:
+                    curr_data = self.embedder(curr_data)
             # dtype = first_item.dtype if len(first_item) > 0 else int
             if self.max_length is None:
                 L = max(len(elem) for elem in curr_data)
@@ -298,7 +302,6 @@ class DataGenerator:
                 try:
                     answer *= pad_value
                 except:
-                    x = 1
                     raise ValueError("")
             for i, elem in enumerate(curr_data):
                 answer[i, :len(elem)] = elem

@@ -9,11 +9,13 @@ from deeppavlov.core.common.params import from_params
 from deeppavlov.core.commands.utils import parse_config
 from deeppavlov.models.embedders.glove_embedder import GloVeEmbedder
 from deeppavlov.models.embedders.fasttext_embedder import FasttextEmbedder
-
+from elmoformanylangs import Embedder as ExternalElmoEmbedder
 
 def load_embeddings(embedder_mode, **kwargs):
     if embedder_mode == "elmo":
         embedder_func = load_elmo
+    elif embedder_mode == "external_elmo":
+        embedder_func = load_external_elmo
     elif embedder_mode == "glove":
         embedder_func = load_glove
     elif embedder_mode == "fasttext":
@@ -29,6 +31,12 @@ def load_elmo(elmo_output_names=("lstm_outputs1",)):
     elmo_config = config["chainer"]["pipe"][-1]
     elmo_config['elmo_output_names'] = elmo_output_names
     embedder = from_params(elmo_config)
+    return embedder
+
+def load_external_elmo(load_path, output_layer=1):
+    embedder = ExternalElmoEmbedder(load_path)
+    embedder.output_layer = output_layer
+    embedder.dim = 1024
     return embedder
 
 def load_glove(load_path):
