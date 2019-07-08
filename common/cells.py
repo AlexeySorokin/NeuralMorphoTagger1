@@ -153,8 +153,6 @@ class BiaffineLayer(kl.Layer):
     def __init__(self, labels_number, input_dim,  use_first_bias=False,
                  use_second_bias=False, use_label_bias=False, activation=None,
                  **kwargs):
-        if 'input_shape' not in kwargs:
-            kwargs['input_shape'] = (input_dim,)
         super(BiaffineLayer, self).__init__(**kwargs)
         self.labels_number = labels_number
         self.input_dim = input_dim
@@ -162,32 +160,34 @@ class BiaffineLayer(kl.Layer):
         self.use_second_bias = use_second_bias
         self.use_label_bias = use_label_bias
         self.activation = kact.get(activation)
-        self.input_spec = [InputSpec(min_ndim=2, axes={-1: self.input_dim}),
-                           InputSpec(min_ndim=2, axes={-1: self.input_dim})]
 
     def build(self, input_shape):
         assert len(input_shape) == 2
-        assert input_shape[0] == input_shape[1]
+        assert input_shape[0][:-1] == input_shape[1][:-1]
 
-        kernel_shape = (self.input_dim, self.input_dim * self.labels_number)
+        first_input_dim, second_input_dim = input_shape[0][-1], input_shape[1][-1]
+        kernel_shape = (first_input_dim, second_input_dim * self.labels_number)
         self.kernel = self.add_weight(shape=kernel_shape, initializer="glorot_uniform", name='kernel')
         if self.use_first_bias:
-            self.first_bias = self.add_weight(shape=(self.input_dim, self.labels_number),
+            self.first_bias = self.add_weight(shape=(first_input_dim, self.labels_number),
                                               initializer="glorot_uniform", name="first_bias")
         if self.use_second_bias:
-            self.second_bias = self.add_weight(shape=(self.input_dim, self.labels_number),
+            self.second_bias = self.add_weight(shape=(second_input_dim, self.labels_number),
                                                initializer="glorot_uniform", name="second_bias")
         if self.use_label_bias:
             self.label_bias = self.add_weight(
                 shape=(self.labels_number,), initializer="glorot_uniform", name="second_bias")
+        self.input_dim = [first_input_dim, second_input_dim]
+        self.input_spec = [InputSpec(min_ndim=2, axes={-1: first_input_dim}),
+                           InputSpec(min_ndim=2, axes={-1: second_input_dim})]
         self.built = True
 
     def call(self, inputs, **kwargs):
         input_shape = [kb.shape(inputs[0])[i] for i in range(kb.ndim(inputs[0]))]
-        first_input = kb.reshape(inputs[0], [-1, self.input_dim])
-        second_input = kb.reshape(inputs[1], [-1, self.input_dim])
+        first_input = kb.reshape(inputs[0], [-1, self.input_dim[0]])
+        second_input = kb.reshape(inputs[1], [-1, self.input_dim[1]])
         first = kb.reshape(kb.dot(first_input, self.kernel),
-                           shape=[-1, self.input_dim, self.labels_number])
+                           shape=[-1, self.input_dim[1], self.labels_number])
         answer = kb.batch_dot(first, second_input, axes=[1, 1])
         if self.use_first_bias:
             answer += kb.dot(first_input, self.first_bias)
