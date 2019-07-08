@@ -51,10 +51,17 @@ def dump_output(outfile, sents, tags, heads, deps, pred_heads, pred_deps, pred_p
                                                          100 * pred_probs_sent[j+1, head_sent[j]]))
             fout.write("\n")
 
+from logging import getLogger
+import logging
+
+
 
 SHORT_OPTS, LONG_OPTS = 'ltT', ["no-load", "no-train", "no-test"]
 
 if __name__ == "__main__":
+    logger = logging.getLogger()
+    logger.setLevel(logging.ERROR)
+
     tf_config = tf.ConfigProto()
     tf_config.gpu_options.per_process_gpu_memory_fraction = 0.3
     kbt.set_session(tf.Session(config=tf_config))

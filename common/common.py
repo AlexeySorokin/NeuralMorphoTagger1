@@ -33,7 +33,7 @@ def to_one_hot(indices, num_classes):
     :param num_classes: int, число классов
     :return: answer, np.array, shape=indices.shape+(num_classes,)
     """
-    shape = indices.shape
+    shape = np.shape(indices)
     indices = np.ravel(indices)
     answer = np.zeros(shape=(indices.shape[0], num_classes), dtype=int)
     answer[np.arange(indices.shape[0]), indices] = 1

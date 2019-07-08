@@ -224,7 +224,7 @@ class DataGenerator:
     POSITION_AS_PADDING = -1
 
     def __init__(self, data, targets=None, embedder=None,
-                 max_length=None, padding=0,
+                 sort_by_length=True, max_length=None, padding=0,
                  additional_data=None, pad_additional_data=True,
                  additional_padding=None, additional_targets=None,
                  target_padding=0, additional_target_paddings=None,
@@ -237,6 +237,7 @@ class DataGenerator:
         self.max_length = max_length
         self.targets = targets
         self.embedder = embedder
+        self.sort_by_length = sort_by_length
         self.padding = padding
         self.additional_data = additional_data or []
         self.pad_additional_data = pad_additional_data
@@ -265,7 +266,10 @@ class DataGenerator:
         if self.additional_target_paddings is None:
             self.additional_target_paddings = [0] * len(self.additional_targets)
         self.indexes = []
-        ordered_indexes = np.argsort([len(x) for x in self.data])
+        if self.sort_by_length:
+            ordered_indexes = np.argsort([len(x) for x in self.data])
+        else:
+            ordered_indexes = np.arange(len(self.data))
         for i in range(0, len(ordered_indexes), self.batch_size):
             self.indexes.append(ordered_indexes[i:i + self.batch_size])
         self.step = 0

@@ -3,7 +3,7 @@ import numpy as np
 from keras import layers as kl, activations as kact, initializers as kinit, backend as kb
 from keras.engine import InputSpec
 import keras.initializers as kint
-
+from keras.constraints import UnitNorm, NonNeg
 
 class Highway(kl.Layer):
 
@@ -206,6 +206,31 @@ class BiaffineLayer(kl.Layer):
         return answer
 
 
+class WeightedSum(kl.Layer):
+
+    def __init__(self, n, **kwargs):
+        super(WeightedSum, self).__init__(**kwargs)
+        self.n = n
+
+    def build(self, input_shape):
+        assert len(input_shape) == self.n
+        for curr_shape in input_shape[1:]:
+            assert curr_shape == input_shape[0]
+
+        self.kernel = self.add_weight(name="weights", initializer=kint.Constant(1.0 / self.n),
+                                      shape=(self.n,), constraint=NonNeg())
+        self.built = True
+
+    def call(self, inputs, **kwargs):
+        answer = inputs[0] * self.kernel[0]
+        for i in range(1, self.n):
+            answer += inputs[i] * self.kernel[i]
+        answer /= kb.sum(self.weights)
+        return answer
+
+    def compute_output_shape(self, input_shape):
+        return input_shape[0]
+    
 # метрики
 
 class MultilabelSigmoidLoss:
