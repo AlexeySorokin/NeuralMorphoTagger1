@@ -205,7 +205,7 @@ class StrangeSyntacticParser:
         embeddings = kl.Concatenate()([projected_inputs, position_embeddings])
         head_states = kl.Dense(state_size, activation=activation)(embeddings)
         dep_states = kl.Dense(state_size, activation=activation)(embeddings)
-        attention = BiaffineAttention(state_size)([head_states, dep_states])
+        attention = BiaffineAttention()([head_states, dep_states])
         attention_probs = kl.Softmax()(attention)
         model = Model(inputs, attention_probs)
         model.compile(optimizer=kopt.Adam(clipnorm=5.0), loss="categorical_crossentropy", metrics=["accuracy"])
@@ -300,7 +300,7 @@ class StrangeSyntacticParser:
         # selecting each word head
         head_encodings = kl.Dropout(dropout)(kl.Dense(state_size, activation="relu")(lstm_output))
         dep_encodings = kl.Dropout(dropout)(kl.Dense(state_size, activation="relu")(lstm_output))
-        head_similarities = BiaffineAttention(state_size, use_first_bias=True)([dep_encodings, head_encodings])
+        head_similarities = BiaffineAttention(use_first_bias=True)([dep_encodings, head_encodings])
         head_probs = kl.Softmax(name="heads", axis=-1)(head_similarities)
         # selecting each word dependency type (with gold heads)
         dep_inputs = kl.Input(shape=(None,), dtype="int32")
@@ -320,7 +320,7 @@ class StrangeSyntacticParser:
         if self.to_predict_children:
             head_encodings = kl.Dropout(dropout)(kl.Dense(state_size, activation="relu")(lstm_output))
             dep_encodings = kl.Dropout(dropout)(kl.Dense(state_size, activation="relu")(lstm_output))
-            similarities = BiaffineAttention(state_size, use_first_bias=True)([head_encodings, dep_encodings])
+            similarities = BiaffineAttention(use_first_bias=True)([head_encodings, dep_encodings])
             child_probs = kl.Activation("sigmoid", name="children")(similarities)
             outputs.append(child_probs)
             child_model = kb.Function(inputs[:-2] + [kb.learning_phase()], [child_probs])

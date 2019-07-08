@@ -97,34 +97,33 @@ def build_word_cnn(inputs, symbols_number=None, char_embeddings_size=16,
 
 class BiaffineAttention(kl.Layer):
 
-    def __init__(self, input_dim, use_first_bias=False, use_second_bias=False,
+    def __init__(self, use_first_bias=False, use_second_bias=False,
                  initializer="identity", **kwargs):
-        if 'input_shape' not in kwargs:
-            kwargs['input_shape'] = (input_dim,)
         super(BiaffineAttention, self).__init__(**kwargs)
-        self.input_dim = input_dim
         self.use_first_bias = use_first_bias
         self.use_second_bias = use_second_bias
-        if initializer == "identity":
-            self.kernel_initializer = kint.Identity(gain=1.0 / np.sqrt(input_dim))
-        else:
-            self.kernel_initializer = kint.glorot_uniform()
-        self.input_spec = [InputSpec(ndim=3, axes={-1: self.input_dim}),
-                           InputSpec(ndim=3, axes={-1: self.input_dim})]
+        self.initializer = initializer
 
     def build(self, input_shape):
         assert len(input_shape) == 2
-        assert input_shape[0] == input_shape[1]
+        assert input_shape[0][:-2] == input_shape[1][:-2]
 
-        kernel_shape = (self.input_dim, self.input_dim)
-        self.kernel = self.add_weight(shape=kernel_shape, initializer=self.kernel_initializer, name='kernel')
-        bias_shape = (self.input_dim, 1)
+        self.input_dim = (input_shape[0][-1], input_shape[1][-1])
+        if self.initializer == "identity":
+            if self.input_dim[0] != self.input_dim[1]:
+                raise ValueError("Input dimensions must be equal in case of 'identity' initializer.")
+            self.kernel_initializer = kint.Identity(gain=1.0 / np.sqrt(self.input_dim[0]))
+        else:
+            self.kernel_initializer = kint.glorot_uniform()
+        self.kernel = self.add_weight(shape=self.input_dim, initializer=self.kernel_initializer, name='kernel')
         if self.use_first_bias:
             self.first_bias = self.add_weight(
-                shape=bias_shape, initializer="glorot_uniform", name="first_bias")
+                shape=(self.input_dim[0], 1), initializer="glorot_uniform", name="first_bias")
         if self.use_second_bias:
             self.second_bias = self.add_weight(
-                shape=bias_shape, initializer="glorot_uniform", name="second_bias")
+                shape=(self.input_dim[1], 1), initializer="glorot_uniform", name="second_bias")
+        self.input_spec = [InputSpec(ndim=3, axes={-1: self.input_dim[0]}),
+                           InputSpec(ndim=3, axes={-1: self.input_dim[1]})]
         self.built = True
 
     def call(self, inputs, **kwargs):
@@ -143,8 +142,8 @@ class BiaffineAttention(kl.Layer):
         return answer
 
     def compute_output_shape(self, input_shape):
-        input_shape = input_shape[0]
-        answer = tuple(input_shape[:-1]) + (input_shape[-2],)
+        first_shape, second_shape = input_shape
+        answer = tuple(first_shape[:-1]) + (second_shape[-2],)
         return answer
 
 
