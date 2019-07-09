@@ -67,6 +67,7 @@ def build_word_cnn(inputs, symbols_number=None, char_embeddings_size=16,
         curr_output = char_embeddings
         curr_filters_number = (min(char_filter_multiple * window_size, 200)
                                if filters_number is None else filters_number)
+        ## разобраться!!!
         ConvLayer = kl.Conv1D if dim == 3 else kl.Conv2D
         conv_params = {"padding": "same", "activation": "relu", "data_format": "channels_last"}
         conv_window_size = window_size if dim == 3 else (1, window_size)
