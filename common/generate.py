@@ -226,8 +226,8 @@ class DataGenerator:
     def __init__(self, data, targets=None, embedder=None,
                  sort_by_length=True, max_length=None, padding=0,
                  additional_data=None, pad_additional_data=True,
-                 additional_embedders=None,
-                 additional_padding=None, additional_targets=None,
+                 additional_embedders=None, additional_padding=None, 
+                 pad_by_first=False, additional_targets=None,
                  target_padding=0, additional_target_paddings=None,
                  yield_targets=True, yield_indexes=False,
                  symbols_number=None, classes_number=None,
@@ -244,6 +244,7 @@ class DataGenerator:
         self.pad_additional_data = pad_additional_data
         self.additional_embedders = additional_embedders
         self.additional_padding = additional_padding
+        self.pad_by_first = pad_by_first
         self.additional_targets = additional_targets or []
         self.target_padding = target_padding
         self.additional_target_paddings = additional_target_paddings
@@ -287,20 +288,21 @@ class DataGenerator:
         return self
 
     def _make_batch(self, data, indexes, classes_number=None,
-                    pad_value=0, use_length=True, embedder=None):
+                    pad_value=0, use_length=True, max_length=None, 
+                    embedder=None):
         first_item = np.array(data[0])
         if first_item.ndim > 0 and use_length:
             curr_data = [data[index] for index in indexes]
             if embedder is not None:
-                if isinstance(self.embedder, ExternalElmoEmbedder):
-                    curr_data = self.embedder.sents2elmo(curr_data)
+                if isinstance(embedder, ExternalElmoEmbedder):
+                    curr_data = embedder.sents2elmo(curr_data)
                 else:
-                    curr_data = self.embedder(curr_data)
+                    curr_data = embedder(curr_data)
             # dtype = first_item.dtype if len(first_item) > 0 else int
-            if self.max_length is None:
+            if max_length is None:
                 L = max(len(elem) for elem in curr_data)
             else:
-                L = self.max_length
+                L = max_length
             first_item = np.array(curr_data[0])
             shape = (len(indexes), L) + np.shape(curr_data[0])[1:]
             answer = np.ones(shape=shape, dtype=first_item.dtype)
@@ -330,7 +332,9 @@ class DataGenerator:
         curr_indexes = self.indexes[self.step]
         curr_batch = self._make_batch(self.data, curr_indexes, self.symbols_number,
                                       pad_value=self.padding, embedder=self.embedder)
-        curr_additional_batch = [self._make_batch(elem, curr_indexes, n, pad_value=pad_value, embedder=embedder)
+        max_length = curr_batch.shape[1] if self.pad_by_first else None
+        curr_additional_batch = [self._make_batch(elem, curr_indexes, n, max_length=max_length,
+                                                  pad_value=pad_value, embedder=embedder)
                                  for elem, n, pad_value, embedder in zip(
                                     self.additional_data, self.additional_symbols_number,
                                     self.additional_padding, self.additional_embedders)]
@@ -340,12 +344,12 @@ class DataGenerator:
             if classes_number == self.POSITIONS_AS_CLASSES:
                 classes_number = curr_batch.shape[1]
             curr_targets = self._make_batch(self.targets, curr_indexes, classes_number,
-                                            pad_value=self.target_padding)
+                                            max_length=max_length, pad_value=self.target_padding)
             if len(self.additional_targets) > 0:
                 additional_classes_number = [n if n != self.POSITIONS_AS_CLASSES else curr_batch.shape[1]
                                              for n in self.additional_classes_number]
                 curr_additional_targets = [
-                    self._make_batch(elem, curr_indexes, n, pad_value=pad_value)
+                    self._make_batch(elem, curr_indexes, n, max_length=max_length, pad_value=pad_value)
                     for elem, n, pad_value in zip(self.additional_targets, additional_classes_number,
                                                   self.additional_target_paddings)
                 ]
