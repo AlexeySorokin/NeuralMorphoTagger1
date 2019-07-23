@@ -40,7 +40,7 @@ class MultirunEarlyStopping(EarlyStopping):
     def on_train_begin(self, logs=None):
         wait, stopped_epoch = self.wait, self.stopped_epoch
         best = getattr(self, "best", np.Inf if self.monitor_op == np.less else -np.Inf)
-        super().on_train_begin(logs=logs)
+        super(MultirunEarlyStopping, self).on_train_begin(logs=logs)
         self.wait, self.stopped_epoch = wait, stopped_epoch
         self.best = best
 
@@ -292,10 +292,10 @@ class DataGenerator:
         if first_item.ndim > 0 and use_length:
             curr_data = [data[index] for index in indexes]
             if embedder is not None:
-                if isinstance(self.embedder, ExternalElmoEmbedder):
-                    curr_data = self.embedder.sents2elmo(curr_data)
+                if isinstance(embedder, ExternalElmoEmbedder):
+                    curr_data = embedder.sents2elmo(curr_data)
                 else:
-                    curr_data = self.embedder(curr_data)
+                    curr_data = embedder(curr_data)
             # dtype = first_item.dtype if len(first_item) > 0 else int
             if self.max_length is None:
                 L = max(len(elem) for elem in curr_data)
