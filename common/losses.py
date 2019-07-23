@@ -28,6 +28,32 @@ class MulticlassSigmoidAccuracy:
         return all_equal
 
 
+class MaskedAccuracy:
+
+    def __init__(self, pad=0, for_sequence=False, name="acc"):
+        if isinstance(pad, float):
+            pad = pad
+        self.pad = [kb.constant(x, dtype="int64") for x in pad]
+        self.for_sequence = for_sequence
+        self.name = name
+        if self.for_sequence:
+            self.name = "sent_" + self.name
+
+    def __call__(self, y_true, y_pred):
+        y_true, y_pred = kb.argmax(y_true, axis=-1), kb.argmax(y_pred, axis=-1)
+        are_equal = kb.cast(kb.equal(y_true, y_pred), kb.floatx())
+        are_not_pad = kb.ones_like(y_true, dtype=kb.floatx())
+        for x in self.pad:
+            are_not_pad *= kb.cast(kb.not_equal(y_true, x), kb.floatx())
+        are_equal *= are_not_pad
+        if self.for_sequence:
+            are_equal = kb.min(kb.cast(kb.equal(are_equal, are_not_pad), kb.floatx()), axis=-1)
+            return are_equal
+        else:
+            are_equal_count = kb.sum(are_equal)
+            are_not_pad_count = kb.sum(are_not_pad)
+            return are_equal_count / are_not_pad_count
+
 class MulticlassSoftmaxLoss:
     
     def __init__(self):

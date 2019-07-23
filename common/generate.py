@@ -223,7 +223,7 @@ class DataGenerator:
     POSITIONS_AS_CLASSES = 0
     POSITION_AS_PADDING = -1
 
-    def __init__(self, data, targets=None, embedder=None,
+    def __init__(self, data, targets=None, sample_probs=None, embedder=None,
                  sort_by_length=True, max_length=None, padding=0,
                  additional_data=None, pad_additional_data=True,
                  additional_embedders=None, additional_padding=None, 
@@ -237,6 +237,7 @@ class DataGenerator:
         self.data = data
         self.max_length = max_length
         self.targets = targets
+        self.sample_probs = sample_probs
         self.embedder = embedder
         self.sort_by_length = sort_by_length
         self.padding = padding
@@ -270,19 +271,25 @@ class DataGenerator:
             self.additional_padding = [0] * len(self.additional_data)
         if self.additional_target_paddings is None:
             self.additional_target_paddings = [0] * len(self.additional_targets)
-        self.indexes = []
+        # self.indexes = []
         if self.sort_by_length:
-            ordered_indexes = np.argsort([len(x) for x in self.data])
+            self.ordered_indexes = np.argsort([len(x) for x in self.data])
         else:
-            ordered_indexes = np.arange(len(self.data))
-        for i in range(0, len(ordered_indexes), self.batch_size):
-            self.indexes.append(ordered_indexes[i:i + self.batch_size])
+            self.ordered_indexes = np.arange(len(self.data))
+        if self.sample_probs is None:
+            self.sample_probs = [1.0] * len(self.data)
+        self.sample_probs = np.array(self.sample_probs)
+        if self.sample_probs.ndim == 1:
+            self.sample_probs = np.expand_dims(self.sample_probs, axis=-1)
+        # for i in range(0, len(ordered_indexes), self.batch_size):
+        #     self.indexes.append(ordered_indexes[i:i + self.batch_size])
         self.step = 0
         self.epoch = 0
+        self.is_epoch_scheduled = False
 
     @property
     def steps_per_epoch(self):
-        return len(self.indexes)
+        return int((len(self.data) - 1) // self.batch_size) + 1
 
     def __iter__(self):
         return self
@@ -324,11 +331,24 @@ class DataGenerator:
             answer = to_one_hot(answer, classes_number)
         return answer
 
+    def _schedule_epoch(self):
+        curr_epoch = min(self.epoch, self.sample_probs.shape[1]-1)
+        sample_probs = self.sample_probs[self.ordered_indexes,curr_epoch]
+        sample_mask = np.random.binomial(1, sample_probs, len(self.data)).astype("bool")
+        epoch_indexes = self.ordered_indexes[sample_mask]
+        self.indexes = []
+        for i in range(0, len(epoch_indexes), self.batch_size):
+            self.indexes.append(epoch_indexes[i:i + self.batch_size])
+        if self.shuffle:
+            np.random.shuffle(self.indexes)
+        self.is_epoch_scheduled = True
+        return len(self.indexes)
+
     def __next__(self):
         if self.epoch == self.nepochs:
             raise StopIteration()
-        if self.shuffle and self.step == 0:
-            np.random.shuffle(self.indexes)
+        if self.step == 0 and not self.is_epoch_scheduled:
+            self._schedule_epoch()
         curr_indexes = self.indexes[self.step]
         curr_batch = self._make_batch(self.data, curr_indexes, self.symbols_number,
                                       pad_value=self.padding, embedder=self.embedder)
@@ -358,8 +378,9 @@ class DataGenerator:
         if self.yield_indexes:
             answer.append(curr_indexes)
         self.step += 1
-        if self.step == self.steps_per_epoch:
+        if self.step == len(self.indexes):
             self.step = 0
+            self.is_epoch_scheduled = False
             self.epoch += 1
         return tuple(answer)
 

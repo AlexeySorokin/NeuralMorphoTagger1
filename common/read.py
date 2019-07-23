@@ -152,7 +152,7 @@ def read_tags_infile(infiles, read_words=False, to_lower=False,
     return tuple(answer) if len(answer) > 1 else answer[0]
 
 
-def read_syntax_infile(infile, to_lower=False, append_case="first",
+def read_syntax_infile(infiles, to_lower=False, append_case="first",
                        word_column=WORD_COLUMN, head_column=HEAD_COLUMN,
                        dep_column=DEP_COLUMN, to_process_word=True,
                        max_sents=-1, to_shuffle=False):
@@ -169,42 +169,38 @@ def read_syntax_infile(infile, to_lower=False, append_case="first",
     """
     answer, info_answer = [], []
     curr_sent, curr_info_sent = [], []
-    with open(infile, "r", encoding="utf8") as fin:
-        print(infile)
-        for line in fin:
-            line = line.strip()
-            if line.startswith("#"):
-                continue
-            if line == "":
-                if len(curr_sent) > 0:
-                    answer.append(curr_sent)
-                    info_answer.append(curr_info_sent)
-                curr_sent, curr_info_sent = [], []
-                if len(answer) == max_sents and not to_shuffle:
-                    break
-                continue
-            splitted = line.split("\t")
-            index = splitted[0]
-            if not index.isdigit() and index != "_":
-                continue
-            word = splitted[word_column]
-            if to_process_word:
-                processed_word = process_word(word, to_lower=to_lower, append_case=append_case)
-            else:
-                processed_word = word
-            # pos, tag = splitted[pos_column], (splitted[tag_column] if read_feats else "_")
-            # if pos == "PUNCT" and word in POS_MAPPING:
-            #     pos = POS_MAPPING[word]
-            # if tag == "_":
-            #     curr_tag = pos
-            # else:
-            #     curr_tag = "{},{}".format(pos, tag)
-            curr_sent.append(processed_word)
-            curr_info = {"head": int(splitted[head_column]), "dep": splitted[dep_column]}
-            curr_info_sent.append(curr_info)
-        if len(curr_sent) > 0:
-            answer.append(curr_sent)
-            info_answer.append(curr_info_sent)
+    if isinstance(infiles, str):
+        infiles = [infiles]
+    for infile in infiles:
+        with open(infile, "r", encoding="utf8") as fin:
+            print(infile)
+            for line in fin:
+                line = line.strip()
+                if line.startswith("#"):
+                    continue
+                if line == "":
+                    if len(curr_sent) > 0:
+                        answer.append(curr_sent)
+                        info_answer.append(curr_info_sent)
+                    curr_sent, curr_info_sent = [], []
+                    if len(answer) == max_sents and not to_shuffle:
+                        break
+                    continue
+                splitted = line.split("\t")
+                index = splitted[0]
+                if not index.isdigit() and index != "_":
+                    continue
+                word = splitted[word_column]
+                if to_process_word:
+                    processed_word = process_word(word, to_lower=to_lower, append_case=append_case)
+                else:
+                    processed_word = word
+                curr_sent.append(processed_word)
+                curr_info = {"head": int(splitted[head_column]), "dep": splitted[dep_column]}
+                curr_info_sent.append(curr_info)
+            if len(curr_sent) > 0:
+                answer.append(curr_sent)
+                info_answer.append(curr_info_sent)
     keys = ["head", "dep"]
     to_return = []
     for key in keys:

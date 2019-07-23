@@ -1,4 +1,5 @@
 from itertools import chain
+from collections import defaultdict
 from heapdict import heapdict
 import inspect
 import ujson as json
