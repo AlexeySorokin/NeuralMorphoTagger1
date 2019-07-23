@@ -223,11 +223,11 @@ class DataGenerator:
     POSITIONS_AS_CLASSES = 0
     POSITION_AS_PADDING = -1
 
-    def __init__(self, data, targets=None, embedder=None,
+    def __init__(self, data, targets=None, sample_probs=None, embedder=None,
                  sort_by_length=True, max_length=None, padding=0,
                  additional_data=None, pad_additional_data=True,
-                 additional_embedders=None,
-                 additional_padding=None, additional_targets=None,
+                 additional_embedders=None, additional_padding=None, 
+                 pad_by_first=False, additional_targets=None,
                  target_padding=0, additional_target_paddings=None,
                  yield_targets=True, yield_indexes=False,
                  symbols_number=None, classes_number=None,
@@ -237,6 +237,7 @@ class DataGenerator:
         self.data = data
         self.max_length = max_length
         self.targets = targets
+        self.sample_probs = sample_probs
         self.embedder = embedder
         self.sort_by_length = sort_by_length
         self.padding = padding
@@ -244,6 +245,7 @@ class DataGenerator:
         self.pad_additional_data = pad_additional_data
         self.additional_embedders = additional_embedders
         self.additional_padding = additional_padding
+        self.pad_by_first = pad_by_first
         self.additional_targets = additional_targets or []
         self.target_padding = target_padding
         self.additional_target_paddings = additional_target_paddings
@@ -269,25 +271,32 @@ class DataGenerator:
             self.additional_padding = [0] * len(self.additional_data)
         if self.additional_target_paddings is None:
             self.additional_target_paddings = [0] * len(self.additional_targets)
-        self.indexes = []
+        # self.indexes = []
         if self.sort_by_length:
-            ordered_indexes = np.argsort([len(x) for x in self.data])
+            self.ordered_indexes = np.argsort([len(x) for x in self.data])
         else:
-            ordered_indexes = np.arange(len(self.data))
-        for i in range(0, len(ordered_indexes), self.batch_size):
-            self.indexes.append(ordered_indexes[i:i + self.batch_size])
+            self.ordered_indexes = np.arange(len(self.data))
+        if self.sample_probs is None:
+            self.sample_probs = [1.0] * len(self.data)
+        self.sample_probs = np.array(self.sample_probs)
+        if self.sample_probs.ndim == 1:
+            self.sample_probs = np.expand_dims(self.sample_probs, axis=-1)
+        # for i in range(0, len(ordered_indexes), self.batch_size):
+        #     self.indexes.append(ordered_indexes[i:i + self.batch_size])
         self.step = 0
         self.epoch = 0
+        self.is_epoch_scheduled = False
 
     @property
     def steps_per_epoch(self):
-        return len(self.indexes)
+        return int((len(self.data) - 1) // self.batch_size) + 1
 
     def __iter__(self):
         return self
 
     def _make_batch(self, data, indexes, classes_number=None,
-                    pad_value=0, use_length=True, embedder=None):
+                    pad_value=0, use_length=True, max_length=None, 
+                    embedder=None):
         first_item = np.array(data[0])
         if first_item.ndim > 0 and use_length:
             curr_data = [data[index] for index in indexes]
@@ -297,10 +306,10 @@ class DataGenerator:
                 else:
                     curr_data = embedder(curr_data)
             # dtype = first_item.dtype if len(first_item) > 0 else int
-            if self.max_length is None:
+            if max_length is None:
                 L = max(len(elem) for elem in curr_data)
             else:
-                L = self.max_length
+                L = max_length
             first_item = np.array(curr_data[0])
             shape = (len(indexes), L) + np.shape(curr_data[0])[1:]
             answer = np.ones(shape=shape, dtype=first_item.dtype)
@@ -322,15 +331,30 @@ class DataGenerator:
             answer = to_one_hot(answer, classes_number)
         return answer
 
+    def _schedule_epoch(self):
+        curr_epoch = min(self.epoch, self.sample_probs.shape[1]-1)
+        sample_probs = self.sample_probs[self.ordered_indexes,curr_epoch]
+        sample_mask = np.random.binomial(1, sample_probs, len(self.data)).astype("bool")
+        epoch_indexes = self.ordered_indexes[sample_mask]
+        self.indexes = []
+        for i in range(0, len(epoch_indexes), self.batch_size):
+            self.indexes.append(epoch_indexes[i:i + self.batch_size])
+        if self.shuffle:
+            np.random.shuffle(self.indexes)
+        self.is_epoch_scheduled = True
+        return len(self.indexes)
+
     def __next__(self):
         if self.epoch == self.nepochs:
             raise StopIteration()
-        if self.shuffle and self.step == 0:
-            np.random.shuffle(self.indexes)
+        if self.step == 0 and not self.is_epoch_scheduled:
+            self._schedule_epoch()
         curr_indexes = self.indexes[self.step]
         curr_batch = self._make_batch(self.data, curr_indexes, self.symbols_number,
                                       pad_value=self.padding, embedder=self.embedder)
-        curr_additional_batch = [self._make_batch(elem, curr_indexes, n, pad_value=pad_value, embedder=embedder)
+        max_length = curr_batch.shape[1] if self.pad_by_first else None
+        curr_additional_batch = [self._make_batch(elem, curr_indexes, n, max_length=max_length,
+                                                  pad_value=pad_value, embedder=embedder)
                                  for elem, n, pad_value, embedder in zip(
                                     self.additional_data, self.additional_symbols_number,
                                     self.additional_padding, self.additional_embedders)]
@@ -340,12 +364,12 @@ class DataGenerator:
             if classes_number == self.POSITIONS_AS_CLASSES:
                 classes_number = curr_batch.shape[1]
             curr_targets = self._make_batch(self.targets, curr_indexes, classes_number,
-                                            pad_value=self.target_padding)
+                                            max_length=max_length, pad_value=self.target_padding)
             if len(self.additional_targets) > 0:
                 additional_classes_number = [n if n != self.POSITIONS_AS_CLASSES else curr_batch.shape[1]
                                              for n in self.additional_classes_number]
                 curr_additional_targets = [
-                    self._make_batch(elem, curr_indexes, n, pad_value=pad_value)
+                    self._make_batch(elem, curr_indexes, n, max_length=max_length, pad_value=pad_value)
                     for elem, n, pad_value in zip(self.additional_targets, additional_classes_number,
                                                   self.additional_target_paddings)
                 ]
@@ -354,8 +378,9 @@ class DataGenerator:
         if self.yield_indexes:
             answer.append(curr_indexes)
         self.step += 1
-        if self.step == self.steps_per_epoch:
+        if self.step == len(self.indexes):
             self.step = 0
+            self.is_epoch_scheduled = False
             self.epoch += 1
         return tuple(answer)
 
