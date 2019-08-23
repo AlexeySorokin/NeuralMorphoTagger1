@@ -67,7 +67,6 @@ def build_word_cnn(inputs, symbols_number=None, char_embeddings_size=16,
         curr_output = char_embeddings
         curr_filters_number = (min(char_filter_multiple * window_size, 200)
                                if filters_number is None else filters_number)
-        ## разобраться!!!
         ConvLayer = kl.Conv1D if dim == 3 else kl.Conv2D
         conv_params = {"padding": "same", "activation": "relu", "data_format": "channels_last"}
         conv_window_size = window_size if dim == 3 else (1, window_size)
@@ -208,30 +207,57 @@ class BiaffineLayer(kl.Layer):
 
 class WeightedSum(kl.Layer):
 
-    def __init__(self, n, **kwargs):
+    def __init__(self, n, dropout=0.0, seed=None, **kwargs):
         super(WeightedSum, self).__init__(**kwargs)
         self.n = n
+        self.dropout = dropout
+        self.seed = seed
+        print("Layer dropout {:.1f}".format(self.dropout))
 
     def build(self, input_shape):
         assert len(input_shape) == self.n
         for curr_shape in input_shape[1:]:
             assert curr_shape == input_shape[0]
 
-        self.kernel = self.add_weight(name="weights", initializer=kint.Constant(1.0 / self.n),
-                                      shape=(self.n,), constraint=NonNeg())
+        self.kernel = self.add_weight(name="weights", initializer=kint.Zeros(), shape=(self.n,))
         self.built = True
 
-    def call(self, inputs, **kwargs):
-        answer = inputs[0] * self.kernel[0]
+    def call(self, inputs, training=None):
+        weights = kb.softmax(self.kernel)
+        if self.dropout > 0.0:
+            def dropped_inputs():
+                return kb.dropout(weights, self.dropout)
+            weights = kb.in_train_phase(dropped_inputs, weights, training=training)
+            weights /= kb.sum(weights)
+        answer = inputs[0] * weights[0]
         for i in range(1, self.n):
-            answer += inputs[i] * self.kernel[i]
-        answer /= kb.sum(self.weights)
+            answer += inputs[i] * weights[i]
+        answer /= kb.sum(weights)
         return answer
 
     def compute_output_shape(self, input_shape):
         return input_shape[0]
+
+
+class LabelSmoothing(kl.Layer):
+
+    def __init__(self, alpha, **kwargs):
+        super(LabelSmoothing, self).__init__(**kwargs)
+        self.alpha = alpha
+
+    def build(self, input_shape):
+        self.classes_number = int(input_shape[-1])
+        self.built = True
+
+    def call(self, inputs, **kwargs):
+        inputs /= kb.expand_dims(kb.sum(inputs, axis=-1))
+        inputs *= (1.0 - self.alpha)
+        inputs += self.alpha / self.classes_number
+        return inputs
+
     
-# метрики
+
+# метрики (переместить в losses)
 
 class MultilabelSigmoidLoss:
 

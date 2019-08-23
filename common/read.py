@@ -1,6 +1,6 @@
 import random
 import sys
-from collections.__init__ import defaultdict
+from collections import defaultdict
 
 WORD_COLUMN, POS_COLUMN, TAG_COLUMN, LEMMA_COLUMN = 1, 3, 5, 2
 HEAD_COLUMN, DEP_COLUMN = 6, 7

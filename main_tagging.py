@@ -14,10 +14,14 @@ from keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
 from common.generate import MultirunEarlyStopping
 from common.read import read_tags_infile, make_UD_pos_and_tag
-from neural_tagging.neural_tagging_1 import CharacterTagger, load_tagger
+try:
+    from neural_tagging.neural_tagging_1 import CharacterTagger, load_tagger
+    from neural_tagging.misc import TagNormalizer, load_tag_normalizer
+    from read import read_substitution_file
+except ImportError:
+    pass
 from neural_LM.neural_LM import load_lm
-from neural_tagging.misc import TagNormalizer, load_tag_normalizer
-from read import read_substitution_file
+
 
 
 DEFAULT_NONE_PARAMS = ["model_file", "test_files", "outfiles", "train_files",
@@ -141,7 +145,8 @@ def are_equal(test, pred):
     return test == pred
 
 def make_output(cls, test_data, test_labels, predictions, probs, basic_probs=None,
-                lm=None, outfile=None, comparison_file=None, gold_history=False):
+                lm=None, outfile=None, comparison_file=None, gold_history=False,
+                additional_output=None):
     return_basic_probs = (basic_probs is not None)
     corr, total, corr_sent = 0, 0, 0
     for pred, test in zip(predictions, test_labels):
@@ -152,9 +157,14 @@ def make_output(cls, test_data, test_labels, predictions, probs, basic_probs=Non
     print("Точность {:.2f}: {} из {} меток".format(100 * corr / total, corr, total))
     print("Точность по предложениям {:.2f}: {} из {} предложений".format(
         100 * corr_sent / len(test_labels), corr_sent, len(test_labels)))
-    if outfile is not None:
+    if additional_output is not None:
+        if len(additional_output) != len(test_data):
+            additional_output = None
+        elif any(len(first) != len(second) for first, second in zip(test_data, additional_output)):
+            additional_output = None    
+    if outfile is not None: 
         with open(outfile, "w", encoding="utf8") as fout:
-            for sent, pred, test in zip(test_data, predictions, test_labels):
+            for i, (sent, pred, test) in enumerate(zip(test_data, predictions, test_labels)):
                 for r, (word, pred_tag, corr_tag) in enumerate(zip(sent, pred, test), 1):
                     if isinstance(corr_tag, list):
                         wrong_tags = [x for x in corr_tag if x not in pred_tag]
@@ -169,6 +179,8 @@ def make_output(cls, test_data, test_labels, predictions, probs, basic_probs=Non
                     else:
                         format_string = "{0}\t{1}\t{2}\t{3}" + ("\tERROR\n" if pred_tag != corr_tag else "\n")
                         fout.write(format_string.format(r, "".join(word), corr_tag, pred_tag))
+                    if additional_output is not None:
+                        fout.write(additional_output[i][r-1] + "\n")
                 fout.write("\n")
     if comparison_file is not None:
         # считаем вероятности правильных слов

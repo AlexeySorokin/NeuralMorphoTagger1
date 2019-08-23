@@ -351,8 +351,9 @@ class DataGenerator:
             self._schedule_epoch()
         curr_indexes = self.indexes[self.step]
         curr_batch = self._make_batch(self.data, curr_indexes, self.symbols_number,
+                                      max_length=self.max_length,
                                       pad_value=self.padding, embedder=self.embedder)
-        max_length = curr_batch.shape[1] if self.pad_by_first else None
+        max_length = self.max_length if self.max_length is not None else curr_batch.shape[1] if self.pad_by_first else None
         curr_additional_batch = [self._make_batch(elem, curr_indexes, n, max_length=max_length,
                                                   pad_value=pad_value, embedder=embedder)
                                  for elem, n, pad_value, embedder in zip(
