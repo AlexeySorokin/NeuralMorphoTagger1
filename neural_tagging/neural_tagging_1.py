@@ -22,9 +22,10 @@ from neural_LM.neural_lm import load_lm
 from neural_tagging.cells import WeightedCombinationLayer, DistanceMatcher, \
     TemporalDropout, leader_loss, positions_func
 from common.cells import build_word_cnn
+from common.losses import MaskedAccuracy
 from neural_tagging.dictionary import read_dictionary
 from neural_tagging.vectorizers import load_vectorizer
-from low_resource_recover.guesser import TagGuesser
+# from low_resource_recover.guesser import TagGuesser
 
 BUCKET_SIZE = 32
 MAX_WORD_LENGTH = 30
@@ -1089,8 +1090,8 @@ class CharacterTagger:
         pre_outputs, states = self._build_basic_network(word_outputs, additional_word_tag_inputs)
         loss = (leader_loss(self.leader_loss_weight) if self.use_leader_loss else
                 "categorical_crossentropy")
-        metric = "accuracy"
-        compile_args = {"optimizer": ko.nadam(clipnorm=5.0), "loss": loss, "metrics": [metric]}
+        metrics = [MaskedAccuracy(pad=[0,1,2]), MaskedAccuracy(pad=[0,1,2], for_sequence=True)]
+        compile_args = {"optimizer": ko.nadam(clipnorm=5.0), "loss": loss, "metrics": metrics}
         if hasattr(self, "lm_"):
             position_inputs = kl.Lambda(positions_func)(word_inputs)
             if self.use_fusion:
